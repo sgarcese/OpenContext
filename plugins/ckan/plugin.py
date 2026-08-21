@@ -4,7 +4,7 @@ This plugin provides access to CKAN-based open data portals.
 """
 
 import logging
-import re as _re
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -16,27 +16,40 @@ from plugins.ckan.sql_validator import SQLValidator
 
 logger = logging.getLogger(__name__)
 
-_SAFE_IDENTIFIER = _re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
-_SAFE_METRIC_EXPR = _re.compile(
+# Whitelists for SQL identifiers and metric expressions assembled by
+# aggregate_data, to prevent SQL injection through field names / aliases.
+# Ported from thealphacubicle/OpenContext (Feature/security update #37).
+_SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
+_SAFE_METRIC_EXPR = re.compile(
     r"^(count\(\s*\*?\s*\)|(?:sum|avg|min|max|stddev|variance)\(\s*[a-zA-Z_][a-zA-Z0-9_]{0,63}\s*\))$",
-    _re.IGNORECASE,
+    re.IGNORECASE,
 )
 
 
-def _validate_identifier(name: str) -> str:
-    if not _SAFE_IDENTIFIER.match(name):
-        raise ValueError(
-            f"Invalid identifier {name!r}: only letters, digits, underscores allowed"
-        )
-    return name
+def _validate_identifier(name: str) -> None:
+    """Validate that ``name`` is a safe SQL identifier.
+
+    Args:
+        name: Identifier to validate.
+
+    Raises:
+        ValueError: If ``name`` is not a safe identifier.
+    """
+    if not isinstance(name, str) or not _SAFE_IDENTIFIER.match(name):
+        raise ValueError(f"Invalid identifier: {name!r}")
 
 
-def _validate_metric_expr(expr: str) -> str:
-    if not _SAFE_METRIC_EXPR.match(expr.strip()):
-        raise ValueError(
-            f"Disallowed metric expression {expr!r}: must be count(*) or sum/avg/min/max/stddev/variance(field)"
-        )
-    return expr
+def _validate_metric_expr(expr: str) -> None:
+    """Validate that ``expr`` is a safe aggregate metric expression.
+
+    Args:
+        expr: Metric expression to validate (e.g. ``count(*)`` or ``avg(field)``).
+
+    Raises:
+        ValueError: If ``expr`` is not an allowed aggregate expression.
+    """
+    if not isinstance(expr, str) or not _SAFE_METRIC_EXPR.match(expr):
+        raise ValueError(f"Invalid metric expression: {expr!r}")
 
 
 class CKANPlugin(BaseOpenDataPlugin):
@@ -540,18 +553,29 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
         Returns:
             Dictionary with success flag, records, fields, or error message
         """
-        safe_group_by = [_validate_identifier(f) for f in group_by]
-        for alias, expr in metrics.items():
-            _validate_identifier(alias)
-            _validate_metric_expr(expr)
-        if filters:
-            for field in filters:
+        # Validate all identifiers/expressions before building SQL to prevent
+        # SQL injection through field names, metric aliases/expressions, or
+        # order_by. Ported from thealphacubicle/OpenContext (security update #37).
+        try:
+            for field in group_by or []:
                 _validate_identifier(field)
-        if having:
-            for expr in having:
-                _validate_identifier(expr)
-        if order_by:
-            _validate_identifier(order_by.lstrip("-").strip())
+            for alias, expr in metrics.items():
+                _validate_identifier(alias)
+                _validate_metric_expr(expr)
+            if filters:
+                for field in filters:
+                    _validate_identifier(field)
+            if having:
+                for expr in having:
+                    # HAVING keys are aggregate expressions like "count(*)";
+                    # validate them as metric expressions.
+                    _validate_metric_expr(expr)
+            if order_by:
+                # order_by may be prefixed with '-' for descending.
+                order_field = order_by[1:] if order_by.startswith("-") else order_by
+                _validate_identifier(order_field)
+        except ValueError as e:
+            return {"error": True, "message": str(e)}
 
         # SELECT
         select_fields = ", ".join(safe_group_by) if safe_group_by else ""

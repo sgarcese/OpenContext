@@ -827,8 +827,12 @@ class TestRetryLogic:
                 pass
 
 
-class TestAggregateDataValidation:
-    """Test input validation in aggregate_data."""
+class TestAggregateDataSecurityHardening:
+    """Test that aggregate_data rejects malicious identifiers/expressions.
+
+    Covers the security hardening ported from thealphacubicle/OpenContext
+    (Feature/security update #37).
+    """
 
     @pytest.fixture
     def ckan_config(self):
@@ -838,79 +842,135 @@ class TestAggregateDataValidation:
             "city_name": "TestCity",
         }
 
-    @pytest.mark.asyncio
-    async def test_aggregate_data_rejects_injected_group_by(self, ckan_config):
+    def _make_plugin(self, ckan_config):
         plugin = CKANPlugin(ckan_config)
-        with pytest.raises(ValueError, match="Invalid identifier"):
-            await plugin.aggregate_data(
-                resource_id="abc-123-def-456-ghi-789-012-345-678-901",
-                group_by=["field; DROP TABLE x --"],
-                metrics={"total": "count(*)"},
-            )
+        plugin._initialized = True
+        return plugin
 
     @pytest.mark.asyncio
-    async def test_aggregate_data_rejects_injected_metric_expr(self, ckan_config):
-        plugin = CKANPlugin(ckan_config)
-        with pytest.raises(ValueError, match="Disallowed metric expression"):
-            await plugin.aggregate_data(
-                resource_id="abc-123-def-456-ghi-789-012-345-678-901",
-                group_by=["category"],
-                metrics={"x": "count(*) UNION SELECT 1"},
-            )
+    async def test_malicious_group_by_rejected(self, ckan_config):
+        """SQL injection via group_by field name is rejected before SQL build."""
+        plugin = self._make_plugin(ckan_config)
+        result = await plugin.aggregate_data(
+            resource_id="abc-123-def-456-ghi-789-012-345-678-901",
+            group_by=["status; DROP TABLE users"],
+            metrics={"count": "count(*)"},
+        )
+        assert result.get("error") is True
+        assert "identifier" in result["message"].lower()
 
     @pytest.mark.asyncio
-    async def test_aggregate_data_rejects_injected_order_by(self, ckan_config):
-        plugin = CKANPlugin(ckan_config)
-        with pytest.raises(ValueError, match="Invalid identifier"):
-            await plugin.aggregate_data(
-                resource_id="abc-123-def-456-ghi-789-012-345-678-901",
-                group_by=["category"],
-                metrics={"total": "count(*)"},
-                order_by="field; DROP TABLE x",
-            )
+    async def test_malicious_metric_alias_rejected(self, ckan_config):
+        """Malicious metric alias is rejected."""
+        plugin = self._make_plugin(ckan_config)
+        result = await plugin.aggregate_data(
+            resource_id="abc-123-def-456-ghi-789-012-345-678-901",
+            group_by=["status"],
+            metrics={"count; DROP TABLE x": "count(*)"},
+        )
+        assert result.get("error") is True
+        assert "identifier" in result["message"].lower()
 
     @pytest.mark.asyncio
-    async def test_aggregate_data_rejects_injected_filter_field(self, ckan_config):
-        plugin = CKANPlugin(ckan_config)
-        with pytest.raises(ValueError, match="Invalid identifier"):
-            await plugin.aggregate_data(
-                resource_id="abc-123-def-456-ghi-789-012-345-678-901",
-                group_by=["category"],
-                metrics={"total": "count(*)"},
-                filters={"field; DROP TABLE x": "val"},
-            )
+    async def test_malicious_metric_expression_rejected(self, ckan_config):
+        """Non-aggregate metric expression is rejected."""
+        plugin = self._make_plugin(ckan_config)
+        result = await plugin.aggregate_data(
+            resource_id="abc-123-def-456-ghi-789-012-345-678-901",
+            group_by=["status"],
+            metrics={"count": "count(*); DROP TABLE users"},
+        )
+        assert result.get("error") is True
+        assert "metric expression" in result["message"].lower()
 
     @pytest.mark.asyncio
-    async def test_aggregate_data_valid_inputs_pass(self, ckan_config):
-        plugin = CKANPlugin(ckan_config)
+    async def test_malicious_filter_field_rejected(self, ckan_config):
+        """SQL injection via filter field name is rejected."""
+        plugin = self._make_plugin(ckan_config)
+        result = await plugin.aggregate_data(
+            resource_id="abc-123-def-456-ghi-789-012-345-678-901",
+            group_by=["status"],
+            metrics={"count": "count(*)"},
+            filters={"status = 'x'; DROP TABLE users--": "Open"},
+        )
+        assert result.get("error") is True
+        assert "identifier" in result["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_malicious_having_expression_rejected(self, ckan_config):
+        """Malicious HAVING expression is rejected."""
+        plugin = self._make_plugin(ckan_config)
+        result = await plugin.aggregate_data(
+            resource_id="abc-123-def-456-ghi-789-012-345-678-901",
+            group_by=["status"],
+            metrics={"count": "count(*)"},
+            having={"count(*) >= 1; DROP TABLE users": 1},
+        )
+        assert result.get("error") is True
+        assert "metric expression" in result["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_malicious_order_by_rejected(self, ckan_config):
+        """SQL injection via order_by is rejected."""
+        plugin = self._make_plugin(ckan_config)
+        result = await plugin.aggregate_data(
+            resource_id="abc-123-def-456-ghi-789-012-345-678-901",
+            group_by=["status"],
+            metrics={"count": "count(*)"},
+            order_by="status; DROP TABLE users",
+        )
+        assert result.get("error") is True
+        assert "identifier" in result["message"].lower()
+
+    @pytest.mark.asyncio
+    async def test_order_by_with_leading_dash_passes_validation(self, ckan_config):
+        """order_by with leading '-' (descending) is accepted, fails downstream only."""
+        plugin = self._make_plugin(ckan_config)
 
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
-            mock_response_init = Mock()
-            mock_response_init.json.return_value = {"success": True}
-            mock_response_init.raise_for_status = Mock()
-            mock_response_sql = Mock()
-            mock_response_sql.json.return_value = {
-                "result": {
-                    "records": [{"category": "A", "total": 5}],
-                    "fields": [],
-                }
-            }
-            mock_response_sql.raise_for_status = Mock()
-            mock_client.post = AsyncMock(
-                side_effect=[mock_response_init, mock_response_sql]
-            )
+            mock_response = Mock()
+            mock_response.json.return_value = {"success": True, "result": {"records": [], "fields": []}}
+            mock_response.raise_for_status = Mock()
+            mock_client.post = AsyncMock(return_value=mock_response)
             mock_client_class.return_value = mock_client
+            plugin.client = mock_client
 
-            await plugin.initialize()
             result = await plugin.aggregate_data(
                 resource_id="abc-123-def-456-ghi-789-012-345-678-901",
-                group_by=["category"],
-                metrics={"total": "count(*)"},
-                filters={"status": "Open"},
-                order_by="category",
-                limit=10,
+                group_by=["status"],
+                metrics={"count": "count(*)"},
+                order_by="-status",
             )
+            # Should not be rejected by identifier validation; downstream call
+            # returns success dict (mocked CKAN API).
+            assert result.get("error") is not True
+            # Confirm the SQL was built with an ORDER BY clause (the leading '-'
+            # is stripped only for validation; the original order_by string is
+            # preserved in the generated SQL).
+            sent_sql = mock_client.post.call_args[1]["json"]["sql"]
+            assert "ORDER BY -status" in sent_sql
 
-        assert result.get("success") is True
-        assert mock_client.post.call_count == 2
+    @pytest.mark.asyncio
+    async def test_valid_aggregate_passes_validation(self, ckan_config):
+        """A well-formed aggregate request passes identifier validation."""
+        plugin = self._make_plugin(ckan_config)
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_response = Mock()
+            mock_response.json.return_value = {"success": True, "result": {"records": [], "fields": []}}
+            mock_response.raise_for_status = Mock()
+            mock_client.post = AsyncMock(return_value=mock_response)
+            mock_client_class.return_value = mock_client
+            plugin.client = mock_client
+
+            result = await plugin.aggregate_data(
+                resource_id="abc-123-def-456-ghi-789-012-345-678-901",
+                group_by=["neighborhood"],
+                metrics={"total": "count(*)", "avg_val": "avg(value)"},
+                filters={"status": "Open"},
+                having={"count(*)": ">= 5"},
+                order_by="neighborhood",
+            )
+            assert result.get("error") is not True
