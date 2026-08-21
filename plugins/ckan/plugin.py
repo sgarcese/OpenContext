@@ -7,40 +7,28 @@ import logging
 from typing import Any, Dict, List, Optional
 
 import httpx
-from tenacity import (
-    retry,
-    retry_if_not_exception_type,
-    stop_after_attempt,
-    wait_exponential,
-)
 
-from core.interfaces import DataPlugin, PluginType, ToolDefinition, ToolResult
+from core.base_plugin import BaseOpenDataPlugin, HTTP_RETRY, ToolHandler
+from core.interfaces import PluginType, ToolDefinition, ToolResult
 from plugins.ckan.config_schema import CKANPluginConfig
 from plugins.ckan.sql_validator import SQLValidator
 
 logger = logging.getLogger(__name__)
 
 
-class CKANPlugin(DataPlugin):
+class CKANPlugin(BaseOpenDataPlugin):
     """Plugin for accessing CKAN-based open data portals.
 
-    This plugin implements the DataPlugin interface and provides tools for
-    searching datasets, retrieving dataset metadata, and querying data.
+    This plugin implements the :class:`DataPlugin` interface on top of
+    :class:`BaseOpenDataPlugin` and provides tools for searching datasets,
+    retrieving dataset metadata, and querying data.
     """
 
     plugin_name = "ckan"
     plugin_type = PluginType.OPEN_DATA
     plugin_version = "1.0.0"
 
-    def __init__(self, config: Dict[str, Any]) -> None:
-        """Initialize CKAN plugin with configuration.
-
-        Args:
-            config: Plugin configuration dictionary
-        """
-        super().__init__(config)
-        self.plugin_config = CKANPluginConfig(**config)
-        self.client: Optional[httpx.AsyncClient] = None
+    config_class = CKANPluginConfig
 
     async def initialize(self) -> bool:
         """Initialize CKAN plugin and test connection.
@@ -49,12 +37,13 @@ class CKANPlugin(DataPlugin):
             True if initialization succeeded
         """
         try:
-            # Create HTTP client
+            # Create HTTP client via the shared helper so it is tracked for
+            # shutdown by the base class.
             headers = {}
             if self.plugin_config.api_key:
                 headers["Authorization"] = self.plugin_config.api_key
 
-            self.client = httpx.AsyncClient(
+            self.client = self._create_http_client(
                 base_url=self.plugin_config.base_url,
                 headers=headers,
                 timeout=self.plugin_config.timeout,
@@ -76,14 +65,6 @@ class CKANPlugin(DataPlugin):
             logger.error(f"Failed to initialize CKAN plugin: {e}", exc_info=True)
             return False
 
-    async def shutdown(self) -> None:
-        """Shutdown plugin and close HTTP client."""
-        if self.client:
-            await self.client.aclose()
-            self.client = None
-        self._initialized = False
-        logger.info("CKAN plugin shut down")
-
     def _parse_ckan_error(
         self, response_body: Dict[str, Any], context: str = ""
     ) -> str:
@@ -96,11 +77,7 @@ class CKANPlugin(DataPlugin):
         base = f"{msg}{portal}" if msg else f"Unknown error{portal}"
         return f"{context}: {base}" if context else base
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=2, max=10),
-        retry=retry_if_not_exception_type((RuntimeError, httpx.HTTPStatusError)),
-    )
+    @HTTP_RETRY
     async def _call_ckan_api(self, action: str, data: Dict[str, Any]) -> Dict[str, Any]:
         """Call CKAN API action.
 
@@ -262,6 +239,8 @@ Examples:
 - Count by field: group_by=["neighborhood"], metrics={{count: "count(*)"}}
 - Multiple metrics: metrics={{total: "count(*)", avg: "avg(field)"}}
 - With filters: filters={{"status": "Open"}}
+- Having: having={{"count(*)": ">= 5"}} (string values may include the
+  operator; numeric values default to ">")
 
 Supports: count(*), sum(), avg(), min(), max(), stddev()
 """,
@@ -284,167 +263,128 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
             ),
         ]
 
-    async def execute_tool(
-        self, tool_name: str, arguments: Dict[str, Any]
-    ) -> ToolResult:
-        """Execute a tool by name.
-
-        Args:
-            tool_name: Name of the tool
-            arguments: Tool arguments
+    def tool_handlers(self) -> Dict[str, ToolHandler]:
+        """Return the mapping of tool name to :class:`ToolHandler`.
 
         Returns:
-            ToolResult with content and success flag
+            Dict mapping tool name (without plugin prefix) to ToolHandler.
         """
-        try:
-            if tool_name == "search_datasets":
-                query = arguments.get("query", "")
-                limit = arguments.get("limit", 20)
-                datasets = await self.search_datasets(query, limit)
-                return ToolResult(
-                    content=[
-                        {
-                            "type": "text",
-                            "text": self._format_search_results(datasets),
-                        }
-                    ],
-                    success=True,
-                )
+        return {
+            "search_datasets": ToolHandler(
+                handler=self._tool_search_datasets,
+            ),
+            "get_dataset": ToolHandler(
+                handler=self._tool_get_dataset,
+                required_args=("dataset_id",),
+            ),
+            "query_data": ToolHandler(
+                handler=self._tool_query_data,
+                required_args=("resource_id",),
+            ),
+            "get_schema": ToolHandler(
+                handler=self._tool_get_schema,
+                required_args=("resource_id",),
+            ),
+            "execute_sql": ToolHandler(
+                handler=self._tool_execute_sql,
+                required_args=("sql",),
+            ),
+            "aggregate_data": ToolHandler(
+                handler=self._tool_aggregate_data,
+                required_args=("resource_id", "metrics"),
+            ),
+        }
 
-            elif tool_name == "get_dataset":
-                dataset_id = arguments.get("dataset_id")
-                if not dataset_id:
-                    return ToolResult(
-                        content=[],
-                        success=False,
-                        error_message="dataset_id is required",
-                    )
-                dataset = await self.get_dataset(dataset_id)
-                return ToolResult(
-                    content=[
-                        {
-                            "type": "text",
-                            "text": self._format_dataset(dataset),
-                        }
-                    ],
-                    success=True,
-                )
+    async def _tool_search_datasets(self, arguments: Dict[str, Any]) -> ToolResult:
+        query = arguments.get("query", "")
+        limit = arguments.get("limit", 20)
+        datasets = await self.search_datasets(query, limit)
+        return ToolResult(
+            content=[
+                {
+                    "type": "text",
+                    "text": self._format_search_results(datasets),
+                }
+            ],
+            success=True,
+        )
 
-            elif tool_name == "query_data":
-                resource_id = arguments.get("resource_id")
-                if not resource_id:
-                    return ToolResult(
-                        content=[],
-                        success=False,
-                        error_message="resource_id is required",
-                    )
-                filters = arguments.get("filters", {})
-                limit = arguments.get("limit", 100)
-                data = await self.query_data(resource_id, filters, limit)
-                return ToolResult(
-                    content=[
-                        {
-                            "type": "text",
-                            "text": self._format_query_results(data, limit),
-                        }
-                    ],
-                    success=True,
-                )
+    async def _tool_get_dataset(self, arguments: Dict[str, Any]) -> ToolResult:
+        dataset = await self.get_dataset(arguments["dataset_id"])
+        return ToolResult(
+            content=[
+                {
+                    "type": "text",
+                    "text": self._format_dataset(dataset),
+                }
+            ],
+            success=True,
+        )
 
-            elif tool_name == "get_schema":
-                resource_id = arguments.get("resource_id")
-                if not resource_id:
-                    return ToolResult(
-                        content=[],
-                        success=False,
-                        error_message="resource_id is required",
-                    )
-                schema = await self.get_schema(resource_id)
-                return ToolResult(
-                    content=[
-                        {
-                            "type": "text",
-                            "text": self._format_schema(schema),
-                        }
-                    ],
-                    success=True,
-                )
+    async def _tool_query_data(self, arguments: Dict[str, Any]) -> ToolResult:
+        filters = arguments.get("filters", {})
+        limit = arguments.get("limit", 100)
+        data = await self.query_data(arguments["resource_id"], filters, limit)
+        return ToolResult(
+            content=[
+                {
+                    "type": "text",
+                    "text": self._format_query_results(data, limit),
+                }
+            ],
+            success=True,
+        )
 
-            elif tool_name == "execute_sql":
-                sql = arguments.get("sql")
-                if not sql:
-                    return ToolResult(
-                        content=[],
-                        success=False,
-                        error_message="sql parameter is required",
-                    )
-                result = await self.execute_sql(sql)
-                if result.get("error"):
-                    return ToolResult(
-                        content=[],
-                        success=False,
-                        error_message=result.get("message", "SQL execution failed"),
-                    )
-                # Format SQL results
-                records = result.get("records", [])
-                fields = result.get("fields", [])
-                formatted_text = self._format_sql_results(records, fields)
-                return ToolResult(
-                    content=[{"type": "text", "text": formatted_text}],
-                    success=True,
-                )
+    async def _tool_get_schema(self, arguments: Dict[str, Any]) -> ToolResult:
+        schema = await self.get_schema(arguments["resource_id"])
+        return ToolResult(
+            content=[
+                {
+                    "type": "text",
+                    "text": self._format_schema(schema),
+                }
+            ],
+            success=True,
+        )
 
-            elif tool_name == "aggregate_data":
-                resource_id = arguments.get("resource_id")
-                if not resource_id:
-                    return ToolResult(
-                        content=[],
-                        success=False,
-                        error_message="resource_id parameter is required",
-                    )
-                metrics = arguments.get("metrics", {})
-                if not metrics:
-                    return ToolResult(
-                        content=[],
-                        success=False,
-                        error_message="metrics parameter is required",
-                    )
-                result = await self.aggregate_data(
-                    resource_id=resource_id,
-                    group_by=arguments.get("group_by", []),
-                    metrics=metrics,
-                    filters=arguments.get("filters"),
-                    having=arguments.get("having"),
-                    order_by=arguments.get("order_by"),
-                    limit=arguments.get("limit", 100),
-                )
-                if result.get("error"):
-                    return ToolResult(
-                        content=[],
-                        success=False,
-                        error_message=result.get("message", "Aggregation failed"),
-                    )
-                formatted = self._format_sql_results(
-                    result.get("records", []), result.get("fields", [])
-                )
-                return ToolResult(
-                    content=[{"type": "text", "text": formatted}], success=True
-                )
-
-            else:
-                return ToolResult(
-                    content=[],
-                    success=False,
-                    error_message=f"Unknown tool: {tool_name}",
-                )
-
-        except Exception as e:
-            logger.error(f"Error executing tool {tool_name}: {e}", exc_info=True)
+    async def _tool_execute_sql(self, arguments: Dict[str, Any]) -> ToolResult:
+        result = await self.execute_sql(arguments["sql"])
+        if result.get("error"):
             return ToolResult(
                 content=[],
                 success=False,
-                error_message=str(e) if str(e) else "Tool execution failed",
+                error_message=result.get("message", "SQL execution failed"),
             )
+        records = result.get("records", [])
+        fields = result.get("fields", [])
+        formatted_text = self._format_sql_results(records, fields)
+        return ToolResult(
+            content=[{"type": "text", "text": formatted_text}],
+            success=True,
+        )
+
+    async def _tool_aggregate_data(self, arguments: Dict[str, Any]) -> ToolResult:
+        result = await self.aggregate_data(
+            resource_id=arguments["resource_id"],
+            group_by=arguments.get("group_by", []),
+            metrics=arguments["metrics"],
+            filters=arguments.get("filters"),
+            having=arguments.get("having"),
+            order_by=arguments.get("order_by"),
+            limit=arguments.get("limit", 100),
+        )
+        if result.get("error"):
+            return ToolResult(
+                content=[],
+                success=False,
+                error_message=result.get("message", "Aggregation failed"),
+            )
+        formatted = self._format_sql_results(
+            result.get("records", []), result.get("fields", [])
+        )
+        return ToolResult(
+            content=[{"type": "text", "text": formatted}], success=True
+        )
 
     async def search_datasets(
         self, query: str, limit: int = 20
@@ -567,7 +507,10 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
             group_by: List of fields to group by
             metrics: Dictionary of metric_name: sql_expression (e.g., {"count": "count(*)"})
             filters: Optional WHERE clause filters (field: value pairs)
-            having: Optional HAVING clause filters (expression: value pairs)
+            having: Optional HAVING clause filters (expression: value pairs).
+                String values may include their own operator (e.g.
+                ``{">= 5"}``-style); numeric values default to the ``>``
+                operator for backward compatibility.
             order_by: Optional field to order by
             limit: Maximum number of results
 
@@ -584,19 +527,8 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
         )
 
         # WHERE
-        where_clause = ""
-        if filters:
-            conditions = []
-            for field, value in filters.items():
-                if isinstance(value, str):
-                    # Escape single quotes in SQL strings
-                    escaped_value = value.replace("'", "''")
-                    conditions.append(f"{field} = '{escaped_value}'")
-                elif value is None:
-                    conditions.append(f"{field} IS NULL")
-                else:
-                    conditions.append(f"{field} = {value}")
-            where_clause = "WHERE " + " AND ".join(conditions)
+        where_body = self.build_where_clause(filters) if filters else ""
+        where_clause = f"WHERE {where_body}" if where_body else ""
 
         # GROUP BY
         group_clause = f"GROUP BY {', '.join(group_by)}" if group_by else ""
@@ -604,7 +536,14 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
         # HAVING
         having_clause = ""
         if having:
-            conditions = [f"{expr} > {value}" for expr, value in having.items()]
+            conditions = []
+            for expr, value in having.items():
+                if isinstance(value, str):
+                    # Value carries its own operator (e.g. ">= 5").
+                    conditions.append(f"{expr} {value}")
+                else:
+                    # Numeric value: default to the documented ">" operator.
+                    conditions.append(f"{expr} > {value}")
             having_clause = "HAVING " + " AND ".join(conditions)
 
         # ORDER BY
@@ -700,20 +639,11 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
         if not records:
             return "No records found matching the query."
 
-        lines = [f"Found {len(records)} record(s) (showing up to {limit}):\n"]
-
-        # Show first few records as examples
-        for i, record in enumerate(records[:5], 1):
-            lines.append(f"Record {i}:")
-            for key, value in record.items():
-                if key != "_id":  # Skip internal ID
-                    lines.append(f"  {key}: {value}")
-            lines.append("")
-
-        if len(records) > 5:
-            lines.append(f"... and {len(records) - 5} more record(s)")
-
-        return "\n".join(lines)
+        return self.format_records(
+            records,
+            max_display=5,
+            header=f"Found {len(records)} record(s) (showing up to {limit}):",
+        )
 
     def _format_schema(self, fields: List[Dict[str, Any]]) -> str:
         """Format schema information for user display."""
@@ -748,22 +678,11 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
         if not records:
             return "No records found matching the SQL query."
 
-        lines = [f"SQL Query Results: {len(records)} record(s)\n"]
-
+        header_lines = [f"SQL Query Results: {len(records)} record(s)"]
         # Show field names if available
         if fields:
             field_names = [field.get("id", "unknown") for field in fields]
-            lines.append(f"Fields: {', '.join(field_names)}\n")
+            header_lines.append(f"Fields: {', '.join(field_names)}")
 
-        # Show first few records as examples
-        for i, record in enumerate(records[:10], 1):
-            lines.append(f"Record {i}:")
-            for key, value in record.items():
-                if key != "_id":  # Skip internal ID
-                    lines.append(f"  {key}: {value}")
-            lines.append("")
-
-        if len(records) > 10:
-            lines.append(f"... and {len(records) - 10} more record(s)")
-
-        return "\n".join(lines)
+        header = "\n".join(header_lines)
+        return self.format_records(records, max_display=10, header=header)
