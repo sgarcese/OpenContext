@@ -116,7 +116,10 @@ class TestPluginInitialization:
             await plugin.shutdown()
 
             mock_client.aclose.assert_called_once()
-            assert plugin.client is None
+            # Base class shutdown clears the tracked client list; the plugin's
+            # ``client`` attribute is no longer guaranteed to be nulled, so we
+            # assert the tracked clients were cleared instead.
+            assert plugin._clients == []
             assert plugin.is_initialized is False
 
 
