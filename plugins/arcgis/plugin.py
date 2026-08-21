@@ -8,6 +8,7 @@ import logging
 import re
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -406,6 +407,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                 f"Dataset {dataset_id} does not have a queryable Feature Service URL"
             )
 
+        service_url = self._validate_feature_url(
+            service_url, self.plugin_config.portal_url
+        )
         service_url = self._ensure_layer_url(service_url)
         meta_url = f"{service_url}?f=json"
 
@@ -492,6 +496,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             )
 
         where_clause = WhereValidator.validate(where)
+        service_url = self._validate_feature_url(
+            service_url, self.plugin_config.portal_url
+        )
         service_url = self._ensure_layer_url(service_url)
         query_url = f"{service_url}/query"
         record_count = min(limit, 1000)
@@ -590,6 +597,45 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             return False
 
     # ── Private helpers ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _validate_feature_url(service_url: str, portal_url: str) -> str:
+        """Restrict Feature Service URLs to trusted ArcGIS hosts.
+
+        Parses ``service_url`` and requires the scheme to be http/https and
+        the host to either end with ``.arcgis.com`` or equal the configured
+        portal host (case-insensitive). This prevents a crafted dataset
+        record from steering Feature Service queries to arbitrary hosts
+        (SSRF). Ported from thealphacubicle/OpenContext (Feature/security
+        update #37).
+
+        Args:
+            service_url: Feature Service URL resolved from a dataset record.
+            portal_url: Configured portal URL (its host is the allow-listed
+                fallback for self-hosted ArcGIS portals).
+
+        Returns:
+            The validated ``service_url`` unchanged.
+
+        Raises:
+            ValueError: If the scheme is not http/https or the host is not
+                a trusted ArcGIS host.
+        """
+        parsed = urlparse(service_url)
+        if parsed.scheme not in ("http", "https"):
+            raise ValueError(
+                f"Feature Service URL must use http or https (got: {parsed.scheme!r})"
+            )
+        host = (parsed.hostname or "").lower()
+        portal_host = (urlparse(portal_url).hostname or "").lower()
+        if not host:
+            raise ValueError("Feature Service URL must include a hostname")
+        if host == portal_host or host.endswith(".arcgis.com"):
+            return service_url
+        raise ValueError(
+            f"Feature Service URL host {host!r} is not trusted "
+            f"(must end with '.arcgis.com' or match portal host {portal_host!r})"
+        )
 
     @staticmethod
     def _ensure_layer_url(service_url: str) -> str:
