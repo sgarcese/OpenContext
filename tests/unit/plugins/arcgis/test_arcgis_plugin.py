@@ -507,6 +507,22 @@ class TestGetSchema:
         ), pytest.raises(ValueError, match="does not have a queryable Feature Service URL"):
             await plugin.get_schema("abc123")
 
+    @pytest.mark.asyncio
+    async def test_get_schema_rejects_untrusted_host(self, arcgis_config):
+        """SSRF guard rejects a Feature Service URL on an untrusted host."""
+        plugin = ArcGISPlugin(arcgis_config)
+
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={
+                "id": "abc123",
+                "service_url": "https://evil.example.com/FeatureServer/0",
+            },
+        ), pytest.raises(ValueError, match="not trusted"):
+            await plugin.get_schema("abc123")
+
 
 # ── query_data (DataPlugin contract) ─────────────────────────────────
 
@@ -656,6 +672,23 @@ class TestQueryFeaturesTwoHop:
             await plugin._query_features("abc123", "1=1", "*", 100)
 
     @pytest.mark.asyncio
+    async def test_query_features_rejects_untrusted_host(self, arcgis_config):
+        """SSRF guard rejects a Feature Service URL on an untrusted host."""
+        plugin = ArcGISPlugin(arcgis_config)
+
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={
+                "id": "abc123",
+                "type": "Feature Layer",
+                "service_url": "http://169.254.169.254/FeatureServer/0",
+            },
+        ), pytest.raises(ValueError, match="not trusted"):
+            await plugin._query_features("abc123", "1=1", "*", 100)
+
+    @pytest.mark.asyncio
     async def test_query_features_non_queryable_type_raises(self, arcgis_config):
         plugin = ArcGISPlugin(arcgis_config)
 
@@ -754,6 +787,88 @@ class TestEnsureLayerUrl:
             "https://services.arcgis.com/xyz/FeatureServer/"
         )
         assert result == "https://services.arcgis.com/xyz/FeatureServer/0"
+
+
+# ── _validate_feature_url (SSRF guard) ───────────────────────────────
+
+
+class TestValidateFeatureUrl:
+    """Test the SSRF guard that restricts Feature Service URLs to trusted hosts.
+
+    Ported from thealphacubicle/OpenContext (Feature/security update #37).
+    """
+
+    PORTAL = "https://hub.arcgis.com"
+
+    def test_allows_arcgis_com_subdomain(self):
+        result = ArcGISPlugin._validate_feature_url(
+            "https://services.arcgis.com/xyz/FeatureServer/0", self.PORTAL
+        )
+        assert result == "https://services.arcgis.com/xyz/FeatureServer/0"
+
+    def test_allows_arcgis_com_case_insensitive(self):
+        result = ArcGISPlugin._validate_feature_url(
+            "https://SERVICES.ARCGIS.COM/xyz/FeatureServer/0", self.PORTAL
+        )
+        assert result == "https://SERVICES.ARCGIS.COM/xyz/FeatureServer/0"
+
+    def test_allows_portal_host_match(self):
+        """Self-hosted ArcGIS portal whose host equals the configured portal host."""
+        portal = "https://gis.cityofboston.gov"
+        result = ArcGISPlugin._validate_feature_url(
+            "https://gis.cityofboston.gov/xyz/FeatureServer/0", portal
+        )
+        assert result == "https://gis.cityofboston.gov/xyz/FeatureServer/0"
+
+    def test_allows_portal_host_case_insensitive(self):
+        portal = "https://GIS.CityOfBoston.gov"
+        result = ArcGISPlugin._validate_feature_url(
+            "https://gis.cityofboston.gov/xyz/FeatureServer/0", portal
+        )
+        assert result == "https://gis.cityofboston.gov/xyz/FeatureServer/0"
+
+    def test_rejects_arbitrary_host(self):
+        with pytest.raises(ValueError, match="not trusted"):
+            ArcGISPlugin._validate_feature_url(
+                "https://evil.example.com/FeatureServer/0", self.PORTAL
+            )
+
+    def test_rejects_internal_localhost(self):
+        with pytest.raises(ValueError, match="not trusted"):
+            ArcGISPlugin._validate_feature_url(
+                "http://localhost:8080/FeatureServer/0", self.PORTAL
+            )
+
+    def test_rejects_169_metadata_host(self):
+        with pytest.raises(ValueError, match="not trusted"):
+            ArcGISPlugin._validate_feature_url(
+                "http://169.254.169.254/latest/meta-data/FeatureServer/0", self.PORTAL
+            )
+
+    def test_rejects_non_http_scheme(self):
+        with pytest.raises(ValueError, match="http or https"):
+            ArcGISPlugin._validate_feature_url(
+                "ftp://services.arcgis.com/FeatureServer/0", self.PORTAL
+            )
+
+    def test_rejects_file_scheme(self):
+        with pytest.raises(ValueError, match="http or https"):
+            ArcGISPlugin._validate_feature_url(
+                "file:///etc/passwd", self.PORTAL
+            )
+
+    def test_rejects_missing_hostname(self):
+        with pytest.raises(ValueError, match="hostname"):
+            ArcGISPlugin._validate_feature_url(
+                "https:///FeatureServer/0", self.PORTAL
+            )
+
+    def test_rejects_lookalike_arcgis_host(self):
+        """A host containing 'arcgis.com' but not ending with it is rejected."""
+        with pytest.raises(ValueError, match="not trusted"):
+            ArcGISPlugin._validate_feature_url(
+                "https://arcgis.com.evil.example.com/FeatureServer/0", self.PORTAL
+            )
 
 
 # ── WhereValidator ────────────────────────────────────────────────────
