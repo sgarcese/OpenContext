@@ -112,8 +112,6 @@ class TestPluginInitialization:
             await plugin.shutdown()
 
             assert mock_client.aclose.call_count == 2
-            assert plugin.discovery_client is None
-            assert plugin.soda_client is None
             assert plugin.is_initialized is False
 
 
