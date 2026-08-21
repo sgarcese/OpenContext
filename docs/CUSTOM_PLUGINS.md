@@ -33,10 +33,12 @@ Custom plugins allow you to integrate OpenContext with your own APIs, databases,
 
 All plugins must:
 
-1. Inherit from `MCPPlugin` (or `DataPlugin` for data sources)
+1. Inherit from `MCPPlugin` (or `DataPlugin` for data sources, or `BaseOpenDataPlugin` for the shared base)
 2. Set class attributes: `plugin_name`, `plugin_type`, `plugin_version`
 3. Implement all required methods
 4. Be placed in `custom_plugins/your_plugin_name/plugin.py`
+
+> **Tip:** The recommended starting point for new open-data providers is `BaseOpenDataPlugin` (see the [plugin template](../custom_plugins/template/plugin_template.py)). It bundles HTTP client lifecycle, retry policy, error translation, and tool dispatch so you only fill in the provider-specific logic.
 
 ## Required Methods
 
