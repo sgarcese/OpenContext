@@ -1,26 +1,24 @@
 """WHERE clause validator for ArcGIS Feature Service queries.
 
 Provides light sanitization of SQL WHERE clauses to prevent
-injection of destructive operations.
+injection of destructive operations. Subclasses
+:class:`BaseQueryValidator` to reuse the shared forbidden-keyword
+scan (which includes GRANT/REVOKE/DECLARE/SET that this plugin
+previously lacked) while keeping the ArcGIS-specific public API
+``validate(where) -> str``.
 """
 
-import re
+from core.query_validator import BaseQueryValidator
 
 
-class WhereValidator:
-    """Validates WHERE clause strings for Feature Service queries."""
+class WhereValidator(BaseQueryValidator):
+    """Validates WHERE clause strings for Feature Service queries.
 
-    FORBIDDEN_KEYWORDS = [
-        "INSERT",
-        "UPDATE",
-        "DELETE",
-        "DROP",
-        "TRUNCATE",
-        "ALTER",
-        "CREATE",
-        "EXEC",
-        "EXECUTE",
-    ]
+    Unlike :meth:`BaseQueryValidator.validate_query`, the ArcGIS Feature
+    Service ``where`` parameter is a WHERE-clause fragment (not a full
+    SELECT statement), so the prefix and dangerous-pattern checks do not
+    apply. Only the forbidden-keyword scan is reused.
+    """
 
     @classmethod
     def validate(cls, where: str) -> str:
@@ -30,7 +28,7 @@ class WhereValidator:
             where: SQL WHERE clause string
 
         Returns:
-            The original WHERE clause if valid, or "1=1" if empty/None
+            The original WHERE clause if valid, or ``"1=1"`` if empty/None
 
         Raises:
             ValueError: If the clause contains forbidden SQL keywords
@@ -42,11 +40,8 @@ class WhereValidator:
         if not where:
             return "1=1"
 
-        where_upper = where.upper()
-        for keyword in cls.FORBIDDEN_KEYWORDS:
-            if re.search(rf"\b{keyword}\b", where_upper):
-                raise ValueError(
-                    f"Forbidden keyword '{keyword}' detected in WHERE clause"
-                )
+        forbidden = cls.scan_forbidden_keywords(where)
+        if forbidden:
+            raise ValueError(f"Forbidden keyword detected in WHERE clause: {forbidden}")
 
         return where
