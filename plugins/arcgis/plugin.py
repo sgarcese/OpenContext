@@ -7,28 +7,32 @@ via the OGC API - Records (Hub Search API) and ArcGIS Feature Services.
 import logging
 import re
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
-from core.interfaces import DataPlugin, PluginType, ToolDefinition, ToolResult
+from core.base_plugin import HTTP_RETRY, BaseOpenDataPlugin, ToolHandler
+from core.interfaces import PluginType, ToolDefinition, ToolResult
 from plugins.arcgis.config_schema import ArcGISPluginConfig
 from plugins.arcgis.where_validator import WhereValidator
 
 logger = logging.getLogger(__name__)
 
 
-class ArcGISPlugin(DataPlugin):
+class ArcGISPlugin(BaseOpenDataPlugin):
     """Plugin for accessing ArcGIS Hub open data catalogs.
 
-    This plugin implements the DataPlugin interface and provides tools for
-    searching datasets, retrieving dataset metadata, querying Feature Services,
-    and exploring catalog aggregations.
+    This plugin implements the DataPlugin interface on top of
+    :class:`BaseOpenDataPlugin` and provides tools for searching datasets,
+    retrieving dataset metadata, querying Feature Services, and exploring
+    catalog aggregations.
     """
 
     plugin_name = "arcgis"
     plugin_type = PluginType.OPEN_DATA
     plugin_version = "1.0.0"
+
+    config_class = ArcGISPluginConfig
 
     QUERYABLE_TYPES = {
         "Feature Layer",
@@ -37,35 +41,33 @@ class ArcGISPlugin(DataPlugin):
         "Table",
     }
 
-    def __init__(self, config: Dict[str, Any]) -> None:
-        super().__init__(config)
-        self.plugin_config: Optional[ArcGISPluginConfig] = None
-        self.hub_client: Optional[httpx.AsyncClient] = None
-        self.feature_client: Optional[httpx.AsyncClient] = None
-
     async def initialize(self) -> bool:
-        try:
-            self.plugin_config = ArcGISPluginConfig(**self.config)
+        """Initialize ArcGIS Hub plugin and test connection.
 
+        Returns:
+            True if initialization succeeded
+        """
+        try:
             headers = {"Accept": "application/json"}
-            feature_headers = {}
+            feature_headers: dict[str, str] = {}
             if self.plugin_config.token:
                 headers["Authorization"] = f"Bearer {self.plugin_config.token}"
                 feature_headers["Authorization"] = f"Bearer {self.plugin_config.token}"
 
-            self.hub_client = httpx.AsyncClient(
+            # Create both clients via the shared helper so they are tracked
+            # for shutdown by the base class.
+            self.hub_client = self._create_http_client(
                 base_url=self.plugin_config.portal_url,
                 headers=headers,
                 timeout=self.plugin_config.timeout,
             )
 
-            self.feature_client = httpx.AsyncClient(
+            self.feature_client = self._create_http_client(
                 headers=feature_headers,
                 timeout=self.plugin_config.timeout,
             )
 
-            response = await self.hub_client.get("/api/search/v1/collections")
-            response.raise_for_status()
+            await self._call_hub_api("/api/search/v1/collections")
 
             self._initialized = True
             logger.info(
@@ -78,18 +80,66 @@ class ArcGISPlugin(DataPlugin):
             logger.error(f"Failed to initialize ArcGIS Hub plugin: {e}", exc_info=True)
             return False
 
-    async def shutdown(self) -> None:
-        if self.hub_client:
-            await self.hub_client.aclose()
-            self.hub_client = None
-        if self.feature_client:
-            await self.feature_client.aclose()
-            self.feature_client = None
-        self._initialized = False
-        logger.info("ArcGIS Hub plugin shut down")
+    @HTTP_RETRY
+    async def _call_hub_api(self, path: str, **kwargs: Any) -> httpx.Response:
+        """Call the ArcGIS Hub Search API via the hub client (GET).
 
-    def get_tools(self) -> List[ToolDefinition]:
-        city = self.plugin_config.city_name if self.plugin_config else "Unknown"
+        Args:
+            path: API path.
+            **kwargs: Additional request arguments forwarded to httpx.
+
+        Returns:
+            The httpx response (caller is responsible for json parsing as
+            appropriate).
+
+        Raises:
+            RuntimeError: On HTTP status errors.
+        """
+        if not self.hub_client:
+            raise RuntimeError("Plugin not initialized")
+
+        try:
+            response = await self.hub_client.get(path, **kwargs)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            self._raise_http_error(e, " Hub Search API")
+
+        return response
+
+    @HTTP_RETRY
+    async def _call_feature_service(
+        self, url: str, params: dict[str, Any]
+    ) -> httpx.Response:
+        """Call an ArcGIS Feature Service endpoint via the feature client (GET).
+
+        Args:
+            url: Absolute Feature Service URL.
+            params: Query parameters.
+
+        Returns:
+            The httpx response (caller is responsible for json parsing).
+
+        Raises:
+            RuntimeError: On HTTP status errors.
+        """
+        if not self.feature_client:
+            raise RuntimeError("Plugin not initialized")
+
+        try:
+            response = await self.feature_client.get(url, params=params)
+            response.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            self._raise_http_error(e, " Feature Service")
+
+        return response
+
+    def get_tools(self) -> list[ToolDefinition]:
+        """Get list of tools provided by ArcGIS Hub plugin.
+
+        Returns:
+            List of tool definitions
+        """
+        city = self.plugin_config.city_name
         return [
             ToolDefinition(
                 name="search_datasets",
@@ -97,7 +147,7 @@ class ArcGISPlugin(DataPlugin):
                 input_schema={
                     "type": "object",
                     "properties": {
-                        "q": {
+                        "query": {
                             "type": "string",
                             "description": "Full-text search query",
                         },
@@ -109,7 +159,7 @@ class ArcGISPlugin(DataPlugin):
                             "maximum": 100,
                         },
                     },
-                    "required": ["q"],
+                    "required": ["query"],
                 },
             ),
             ToolDefinition(
@@ -151,6 +201,26 @@ class ArcGISPlugin(DataPlugin):
                 },
             ),
             ToolDefinition(
+                name="get_schema",
+                description=(
+                    f"Get field schema for an ArcGIS Feature Service layer in {city}'s "
+                    f"ArcGIS Hub catalog. Returns field names, types, and aliases "
+                    f"directly usable in query_data where/out_fields. Provide the Hub "
+                    f"dataset ID — the plugin resolves the Feature Service URL "
+                    f"automatically (two-hop)."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {
+                            "type": "string",
+                            "description": "Hub item ID (same as get_dataset)",
+                        },
+                    },
+                    "required": ["dataset_id"],
+                },
+            ),
+            ToolDefinition(
                 name="query_data",
                 description=(
                     "Query records from an ArcGIS Feature Service. Provide the Hub "
@@ -188,109 +258,89 @@ class ArcGISPlugin(DataPlugin):
             ),
         ]
 
-    async def execute_tool(
-        self, tool_name: str, arguments: Dict[str, Any]
-    ) -> ToolResult:
-        try:
-            if tool_name == "search_datasets":
-                q = arguments.get("q", "")
-                limit = arguments.get("limit", 10)
-                datasets = await self.search_datasets(q, limit)
-                return ToolResult(
-                    content=[
-                        {"type": "text", "text": self._format_search_results(datasets)}
-                    ],
-                    success=True,
-                )
+    def tool_handlers(self) -> dict[str, ToolHandler]:
+        """Return the mapping of tool name to :class:`ToolHandler`.
 
-            elif tool_name == "get_dataset":
-                dataset_id = arguments.get("dataset_id")
-                if not dataset_id:
-                    return ToolResult(
-                        content=[],
-                        success=False,
-                        error_message="dataset_id is required",
-                    )
-                dataset = await self.get_dataset(dataset_id)
-                return ToolResult(
-                    content=[{"type": "text", "text": self._format_dataset(dataset)}],
-                    success=True,
-                )
+        Returns:
+            Dict mapping tool name (without plugin prefix) to ToolHandler.
+        """
+        return {
+            "search_datasets": ToolHandler(handler=self._tool_search_datasets),
+            "get_dataset": ToolHandler(
+                handler=self._tool_get_dataset, required_args=("dataset_id",)
+            ),
+            "get_aggregations": ToolHandler(
+                handler=self._tool_get_aggregations, required_args=("field",)
+            ),
+            "get_schema": ToolHandler(
+                handler=self._tool_get_schema, required_args=("dataset_id",)
+            ),
+            "query_data": ToolHandler(
+                handler=self._tool_query_data, required_args=("dataset_id",)
+            ),
+        }
 
-            elif tool_name == "get_aggregations":
-                field = arguments.get("field")
-                if not field:
-                    return ToolResult(
-                        content=[],
-                        success=False,
-                        error_message="field is required",
-                    )
-                q = arguments.get("q")
-                buckets = await self.get_aggregations(field, q)
-                return ToolResult(
-                    content=[
-                        {
-                            "type": "text",
-                            "text": self._format_aggregations(field, buckets),
-                        }
-                    ],
-                    success=True,
-                )
+    async def _tool_search_datasets(self, arguments: dict[str, Any]) -> ToolResult:
+        query = arguments.get("query", "")
+        limit = arguments.get("limit", 10)
+        datasets = await self.search_datasets(query, limit)
+        return ToolResult(
+            content=[{"type": "text", "text": self._format_search_results(datasets)}],
+            success=True,
+        )
 
-            elif tool_name == "query_data":
-                dataset_id = arguments.get("dataset_id")
-                if not dataset_id:
-                    return ToolResult(
-                        content=[],
-                        success=False,
-                        error_message="dataset_id is required",
-                    )
-                where = arguments.get("where", "1=1")
-                out_fields = arguments.get("out_fields", "*")
-                limit = arguments.get("limit", 100)
-                filters = {"where": where, "out_fields": out_fields}
-                records = await self.query_data(dataset_id, filters, limit)
-                return ToolResult(
-                    content=[
-                        {
-                            "type": "text",
-                            "text": self._format_query_results(records, limit),
-                        }
-                    ],
-                    success=True,
-                )
+    async def _tool_get_dataset(self, arguments: dict[str, Any]) -> ToolResult:
+        dataset = await self.get_dataset(arguments["dataset_id"])
+        return ToolResult(
+            content=[{"type": "text", "text": self._format_dataset(dataset)}],
+            success=True,
+        )
 
-            else:
-                return ToolResult(
-                    content=[],
-                    success=False,
-                    error_message=f"Unknown tool: {tool_name}",
-                )
+    async def _tool_get_aggregations(self, arguments: dict[str, Any]) -> ToolResult:
+        field = arguments["field"]
+        q = arguments.get("q")
+        buckets = await self.get_aggregations(field, q)
+        return ToolResult(
+            content=[{"type": "text", "text": self._format_aggregations(field, buckets)}],
+            success=True,
+        )
 
-        except Exception as e:
-            logger.error(f"Error executing tool {tool_name}: {e}", exc_info=True)
-            return ToolResult(
-                content=[],
-                success=False,
-                error_message=str(e) if str(e) else "Tool execution failed",
-            )
+    async def _tool_get_schema(self, arguments: dict[str, Any]) -> ToolResult:
+        schema = await self.get_schema(arguments["dataset_id"])
+        return ToolResult(
+            content=[{"type": "text", "text": self._format_schema(schema)}],
+            success=True,
+        )
+
+    async def _tool_query_data(self, arguments: dict[str, Any]) -> ToolResult:
+        dataset_id = arguments["dataset_id"]
+        where = arguments.get("where", "1=1")
+        out_fields = arguments.get("out_fields", "*")
+        limit = arguments.get("limit", 100)
+        records = await self._query_features(dataset_id, where, out_fields, limit)
+        return ToolResult(
+            content=[{"type": "text", "text": self._format_query_results(records, limit)}],
+            success=True,
+        )
 
     # ── DataPlugin abstract method implementations ──────────────────────
 
     async def search_datasets(
         self, query: str, limit: int = 10
-    ) -> List[Dict[str, Any]]:
-        try:
-            response = await self.hub_client.get(
-                "/api/search/v1/collections/all/items",
-                params={"q": query, "limit": limit},
-            )
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise RuntimeError(
-                f"Hub Search API error (HTTP {e.response.status_code}): "
-                f"{e.response.text}"
-            ) from e
+    ) -> list[dict[str, Any]]:
+        """Search for datasets matching a query.
+
+        Args:
+            query: Search query string
+            limit: Maximum number of results
+
+        Returns:
+            List of dataset metadata dictionaries
+        """
+        response = await self._call_hub_api(
+            "/api/search/v1/collections/all/items",
+            params={"q": query, "limit": limit},
+        )
 
         data = response.json()
         features = data.get("features", [])
@@ -303,17 +353,18 @@ class ArcGISPlugin(DataPlugin):
             results.append(self._extract_dataset_summary(props))
         return results
 
-    async def get_dataset(self, dataset_id: str) -> Dict[str, Any]:
-        try:
-            response = await self.hub_client.get(
-                f"/api/search/v1/collections/all/items/{dataset_id}",
-            )
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise RuntimeError(
-                f"Hub Search API error (HTTP {e.response.status_code}): "
-                f"{e.response.text}"
-            ) from e
+    async def get_dataset(self, dataset_id: str) -> dict[str, Any]:
+        """Get detailed metadata for a specific dataset.
+
+        Args:
+            dataset_id: Hub item ID
+
+        Returns:
+            Dataset metadata dictionary
+        """
+        response = await self._call_hub_api(
+            f"/api/search/v1/collections/all/items/{dataset_id}",
+        )
 
         feature = response.json()
         props = feature.get("properties", {})
@@ -332,20 +383,106 @@ class ArcGISPlugin(DataPlugin):
         )
         return result
 
+    async def get_schema(self, dataset_id: str) -> list[dict[str, Any]]:
+        """Get field schema for a dataset's Feature Service layer.
+
+        Resolves the Feature Service URL via :meth:`get_dataset` (two-hop),
+        then fetches the layer metadata (``{service_url}/0?f=json``) and
+        returns the ``fields`` list (name, type, alias).
+
+        Args:
+            dataset_id: Hub item ID
+
+        Returns:
+            List of field definition dictionaries (name, type, alias)
+
+        Raises:
+            ValueError: If the dataset has no queryable service URL.
+        """
+        dataset = await self.get_dataset(dataset_id)
+        service_url = dataset.get("service_url")
+        if not service_url:
+            raise ValueError(
+                f"Dataset {dataset_id} does not have a queryable Feature Service URL"
+            )
+
+        service_url = self._ensure_layer_url(service_url)
+        meta_url = f"{service_url}?f=json"
+
+        response = await self._call_feature_service(meta_url, {})
+
+        data = response.json()
+        fields = data.get("fields", [])
+        return [
+            {
+                "name": f.get("name", ""),
+                "type": f.get("type", ""),
+                "alias": f.get("alias", ""),
+            }
+            for f in fields
+        ]
+
     async def query_data(
         self,
         resource_id: str,
-        filters: Optional[Dict[str, Any]] = None,
+        filters: dict[str, Any] | None = None,
         limit: int = 100,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
+        """Query data from a dataset (DataPlugin contract).
+
+        Compiles ``field: value`` filters into an ArcGIS WHERE clause using
+        :meth:`BaseOpenDataPlugin.build_where_clause`, validating each field
+        identifier with :meth:`WhereValidator.scan_forbidden_keywords` to
+        block SQL injection through field names. Defaults to ``"1=1"`` when
+        no filters are supplied.
+
+        Args:
+            resource_id: Hub item ID
+            filters: Optional field/value pairs compiled to a WHERE clause
+            limit: Maximum number of records
+
+        Returns:
+            List of data records
+        """
+        where_clause = "1=1"
+        if filters:
+            for field in filters:
+                forbidden = WhereValidator.scan_forbidden_keywords(field)
+                if forbidden:
+                    raise ValueError(f"Invalid field name: {forbidden}")
+            built = self.build_where_clause(filters)
+            if built:
+                where_clause = built
+
+        return await self._query_features(resource_id, where_clause, "*", limit)
+
+    async def _query_features(
+        self,
+        dataset_id: str,
+        where: str,
+        out_fields: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Query records from an ArcGIS Feature Service (two-hop resolution).
+
+        Args:
+            dataset_id: Hub item ID
+            where: SQL WHERE clause (validated via :class:`WhereValidator`)
+            out_fields: Comma-separated field names to return
+            limit: Maximum number of records
+
+        Returns:
+            List of feature attribute dicts
+        """
         if limit < 1:
             raise ValueError(f"limit must be at least 1 (got {limit})")
-        dataset = await self.get_dataset(resource_id)
+
+        dataset = await self.get_dataset(dataset_id)
         service_url = dataset.get("service_url")
         ds_type = dataset.get("type", "")
         if not service_url:
             raise ValueError(
-                f"Dataset {resource_id} does not have a queryable Feature Service URL"
+                f"Dataset {dataset_id} does not have a queryable Feature Service URL"
             )
 
         if ds_type and ds_type not in self.QUERYABLE_TYPES:
@@ -354,10 +491,7 @@ class ArcGISPlugin(DataPlugin):
                 f"query_data only supports: {', '.join(sorted(self.QUERYABLE_TYPES))}."
             )
 
-        where_clause = filters.get("where", "1=1") if filters else "1=1"
-        where_clause = WhereValidator.validate(where_clause)
-        out_fields = filters.get("out_fields", "*") if filters else "*"
-
+        where_clause = WhereValidator.validate(where)
         service_url = self._ensure_layer_url(service_url)
         query_url = f"{service_url}/query"
         record_count = min(limit, 1000)
@@ -369,14 +503,7 @@ class ArcGISPlugin(DataPlugin):
             "returnGeometry": "false",
         }
 
-        try:
-            response = await self.feature_client.get(query_url, params=params)
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise RuntimeError(
-                f"Feature Service query error (HTTP {e.response.status_code}): "
-                f"{e.response.text}"
-            ) from e
+        response = await self._call_feature_service(query_url, params)
 
         try:
             data = response.json()
@@ -408,22 +535,27 @@ class ArcGISPlugin(DataPlugin):
     # ── Aggregations (standalone helper, not a DataPlugin method) ───────
 
     async def get_aggregations(
-        self, field: str, q: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        params: Dict[str, Any] = {}
+        self, field: str, q: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Get facet counts for a field across the ArcGIS Hub catalog.
+
+        Args:
+            field: Field to aggregate (e.g. "type", "tags").
+            q: Optional search query to scope the aggregation.
+
+        Returns:
+            List of ``{"key", "doc_count"}`` buckets.
+        """
+        params: dict[str, Any] = {}
         if q:
             params["q"] = q
 
         try:
-            response = await self.hub_client.get(
+            response = await self._call_hub_api(
                 "/api/search/v1/collections/all/aggregations", params=params
             )
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            logger.warning(
-                f"Hub Aggregations API error (HTTP {e.response.status_code}): "
-                f"{e.response.text}"
-            )
+        except RuntimeError as e:
+            logger.warning(f"Hub Aggregations API error: {e}")
             return []
 
         data = response.json()
@@ -445,9 +577,14 @@ class ArcGISPlugin(DataPlugin):
     # ── Health check ────────────────────────────────────────────────────
 
     async def health_check(self) -> bool:
+        """Check if the ArcGIS Hub API is accessible.
+
+        Returns:
+            True if healthy
+        """
         try:
-            response = await self.hub_client.get("/api/search/v1/collections")
-            return response.status_code == 200
+            await self._call_hub_api("/api/search/v1/collections")
+            return True
         except Exception as e:
             logger.error(f"Health check failed: {e}")
             return False
@@ -474,7 +611,7 @@ class ArcGISPlugin(DataPlugin):
             return ""
 
     @staticmethod
-    def _extract_dataset_summary(props: Dict[str, Any]) -> Dict[str, Any]:
+    def _extract_dataset_summary(props: dict[str, Any]) -> dict[str, Any]:
         description = props.get("description", "") or ""
         if len(description) > 300:
             description = description[:300] + "..."
@@ -493,7 +630,7 @@ class ArcGISPlugin(DataPlugin):
             "extent": props.get("extent", []),
         }
 
-    def _format_search_results(self, datasets: List[Dict[str, Any]]) -> str:
+    def _format_search_results(self, datasets: list[dict[str, Any]]) -> str:
         if not datasets:
             return "No datasets found."
 
@@ -512,7 +649,7 @@ class ArcGISPlugin(DataPlugin):
 
         return "\n".join(lines)
 
-    def _format_dataset(self, dataset: Dict[str, Any]) -> str:
+    def _format_dataset(self, dataset: dict[str, Any]) -> str:
         tags = ", ".join(dataset.get("tags", [])) if dataset.get("tags") else "None"
         lines = [
             f"Dataset: {dataset.get('title', 'Untitled')}",
@@ -536,7 +673,23 @@ class ArcGISPlugin(DataPlugin):
         ]
         return "\n".join(lines)
 
-    def _format_query_results(self, records: List[Dict[str, Any]], limit: int) -> str:
+    def _format_schema(self, fields: list[dict[str, Any]]) -> str:
+        """Format schema information for user display."""
+        if not fields:
+            return "No schema information available."
+
+        lines = ["Schema fields:"]
+        for field in fields:
+            name = field.get("name", "unknown")
+            ftype = field.get("type", "unknown")
+            alias = field.get("alias", "")
+            lines.append(f"  • {name} ({ftype})")
+            if alias and alias != name:
+                lines.append(f"    Alias: {alias}")
+
+        return "\n".join(lines)
+
+    def _format_query_results(self, records: list[dict[str, Any]], limit: int) -> str:
         if not records:
             return "No records returned."
 
@@ -550,7 +703,7 @@ class ArcGISPlugin(DataPlugin):
 
         return "\n".join(lines)
 
-    def _format_aggregations(self, field: str, buckets: List[Dict[str, Any]]) -> str:
+    def _format_aggregations(self, field: str, buckets: list[dict[str, Any]]) -> str:
         if not buckets:
             return f"No aggregation results for '{field}'."
 
