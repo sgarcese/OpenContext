@@ -1,6 +1,6 @@
 # Built-in Plugins Reference
 
-OpenContext includes built-in plugins for CKAN, Socrata, and Opendatasoft open data portals.
+OpenContext includes built-in plugins for CKAN, Socrata, ArcGIS Hub, and Opendatasoft open data portals.
 
 ## CKAN Plugin
 
@@ -25,6 +25,14 @@ plugins:
 - `ckan__get_dataset(dataset_id)` - Get dataset metadata
 - `ckan__query_data(resource_id, filters, limit)` - Query data from a resource
 - `ckan__get_schema(resource_id)` - Get schema for a resource
+- `ckan__execute_sql(sql)` - Execute a validated `SELECT` query against the datastore
+- `ckan__aggregate_data(resource_id, metrics, group_by, filters, having, order_by, limit)` - GROUP BY aggregations without writing SQL
+
+**`aggregate_data` notes:**
+- `metrics` maps alias to expression, e.g. `{"cnt": "count(*)", "avg_amt": "avg(amount)"}`. Supported: `count(*)`, `count(field)`, `count(distinct field)`, `sum()`, `avg()`, `min()`, `max()`, `stddev()`, `variance()`
+- `having` keys are aggregate expressions or declared metric aliases; string values may carry a comparison operator (`{"count(*)": ">= 5"}`), bare numbers default to `>`
+- `order_by` accepts `"field"`, `"-field"` (descending), or `"field ASC|DESC"`
+- All identifiers and expressions are validated against safe whitelists before SQL is built
 
 ### Examples
 
@@ -114,6 +122,40 @@ This plugin uses two Socrata API layers:
 - **SODA3** (portal domain) - Dataset metadata, schema, data queries
 
 See [Socrata developer documentation](https://dev.socrata.com/) for details.
+
+## ArcGIS Plugin
+
+For ArcGIS Hub / ArcGIS Open Data portals (e.g., hub.arcgis.com, city Hub sites).
+
+### Configuration
+
+```yaml
+plugins:
+  arcgis:
+    enabled: true
+    portal_url: "https://hub.arcgis.com"   # ArcGIS Hub portal URL
+    city_name: "Your City"
+    timeout: 120
+    # token: "${ARCGIS_TOKEN}"             # Optional: Bearer token for private items
+    # trusted_service_hosts:               # Extra hosts for self-hosted Feature Services
+    #   - "gis.yourcity.gov"
+```
+
+### Tools
+
+- `arcgis__search_datasets(query, limit)` - Search the Hub catalog (query required)
+- `arcgis__get_dataset(dataset_id)` - Get Hub item metadata
+- `arcgis__get_aggregations(field, query)` - Aggregate counts for a field
+- `arcgis__get_schema(dataset_id)` - Get Feature Service layer schema
+- `arcgis__query_data(dataset_id, where, out_fields, limit)` - Query records (limit max 1000)
+
+### Security notes
+
+Feature Service URLs resolved from Hub metadata are restricted to `*.arcgis.com`, the configured portal host, or hosts listed in `trusted_service_hosts` (exact host or subdomain) — an SSRF guard. Add self-hosted city GIS domains to `trusted_service_hosts` when Hub datasets reference them. `where` clauses are validated with a forbidden-keyword scan that skips quoted string literals, so values like `status = 'SET'` are fine.
+
+### ArcGIS API
+
+This plugin uses a two-hop flow: the Hub API resolves a dataset ID to its Feature Service URL, then records are queried from that service.
 
 ## Opendatasoft Plugin
 
