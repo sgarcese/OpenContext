@@ -531,8 +531,9 @@ class TestQueryData:
         assert "call_type: Noise" in text
 
     @pytest.mark.asyncio
-    async def test_query_data_caps_displayed_records(self):
-        """Test that only the first 10 records are rendered."""
+    async def test_query_data_displays_all_fetched_records(self):
+        """Every fetched record is rendered (display cap = fetch cap), so no
+        transfer is wasted on records the caller never sees."""
         records = [{"i": i} for i in range(25)]
         plugin, _ = _initialized_plugin(
             get_return={"total_count": 25, "results": records}
@@ -541,9 +542,8 @@ class TestQueryData:
         result = await plugin.execute_tool("query_data", {"dataset_id": "d"})
 
         text = result.content[0]["text"]
-        assert "Record 10:" in text
-        assert "Record 11:" not in text
-        assert "... and 15 more record(s)" in text
+        assert "Record 25:" in text
+        assert "more record(s)" not in text
 
     @pytest.mark.asyncio
     async def test_query_data_empty_results_message(self):
@@ -601,7 +601,9 @@ class TestQueryData:
         )
 
         params = mock_client.get.call_args[1]["params"]
-        assert params["where"] == "call_type = 'Noise' AND year = 2026"
+        # ODSQL string literals are double-quoted (single-quote doubling is
+        # SQL convention and an ODSQL syntax error).
+        assert params["where"] == 'call_type = "Noise" and year = 2026'
         assert params["limit"] == 10
         assert records == self.RECORDS_RESPONSE["results"]
 
@@ -618,7 +620,7 @@ class TestQueryData:
     async def test_contract_query_data_rejects_malicious_filter_field(self):
         """Test that filter field names are validated by the base class."""
         plugin, _ = _initialized_plugin()
-        with pytest.raises(ValueError, match="Invalid filter field name"):
+        with pytest.raises(ValueError, match="Invalid identifier"):
             await plugin.query_data("d", {"a; DROP TABLE t": 1})
 
 
@@ -933,3 +935,116 @@ class TestAggregateWithoutGroupBy:
 
         await plugin.aggregate_data("ds", metrics={"n": "count(*)"}, group_by=["f"], limit=50)
         assert mock_client.get.call_args[1]["params"]["limit"] == 50
+
+
+class TestDatasetIdValidation:
+    """dataset_id is interpolated into the request path and must be a safe
+    URL slug (code-review finding)."""
+
+    def _plugin(self):
+        plugin = OpendatasoftPlugin(
+            {
+                "base_url": "https://data.example.com",
+                "portal_url": "https://data.example.com",
+                "city_name": "TestCity",
+            }
+        )
+        plugin._initialized = True
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.json.return_value = {"total_count": 0, "results": []}
+        mock_response.raise_for_status = Mock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        plugin.client = mock_client
+        return plugin, mock_client
+
+    @pytest.mark.asyncio
+    async def test_path_traversal_rejected(self):
+        plugin, mock_client = self._plugin()
+        for bad in ("../../catalog/exports", "x/y", "x?apikey=steal", "x#f", "a b"):
+            result = await plugin.execute_tool("get_dataset", {"dataset_id": bad})
+            assert result.success is False, bad
+            assert "Invalid dataset_id" in result.error_message
+        mock_client.get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_legitimate_slugs_accepted(self):
+        plugin, _ = self._plugin()
+        for good in ("tree-inventory", "sv2030", "code_violations", "ds@catalog"):
+            result = await plugin.execute_tool("get_dataset", {"dataset_id": good})
+            assert result.success is True, good
+
+    @pytest.mark.asyncio
+    async def test_query_and_aggregate_also_guarded(self):
+        plugin, _ = self._plugin()
+        r = await plugin.execute_tool(
+            "query_data", {"dataset_id": "../x", "limit": 1}
+        )
+        assert r.success is False
+        r = await plugin.execute_tool(
+            "aggregate_data", {"dataset_id": "../x", "metrics": {"n": "count(*)"}}
+        )
+        assert r.success is False
+
+
+class TestCodeReviewFixes:
+    """Regressions confirmed by the adversarial review of this branch."""
+
+    def _plugin(self, get_return=None):
+        plugin = OpendatasoftPlugin(
+            {
+                "base_url": "https://data.example.com",
+                "portal_url": "https://data.example.com",
+                "city_name": "TestCity",
+            }
+        )
+        plugin._initialized = True
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.json.return_value = get_return or {"total_count": 0, "results": []}
+        mock_response.raise_for_status = Mock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        plugin.client = mock_client
+        return plugin, mock_client
+
+    @pytest.mark.asyncio
+    async def test_apostrophe_filter_value_uses_odsql_escaping(self):
+        plugin, mock_client = self._plugin()
+        await plugin.query_data("d", {"name": "Val-d'Or"}, limit=5)
+        where = mock_client.get.call_args[1]["params"]["where"]
+        assert where == 'name = "Val-d\'Or"'
+
+    @pytest.mark.asyncio
+    async def test_embedded_double_quote_escaped_with_backslash(self):
+        plugin, mock_client = self._plugin()
+        await plugin.query_data("d", {"name": 'say "hi"'}, limit=5)
+        where = mock_client.get.call_args[1]["params"]["where"]
+        assert where == 'name = "say \\"hi\\""'
+
+    @pytest.mark.asyncio
+    async def test_limits_clamped_on_all_paths(self):
+        plugin, mock_client = self._plugin()
+        await plugin.query_data("d", limit=0)
+        assert mock_client.get.call_args[1]["params"]["limit"] == 1
+        await plugin.query_data("d", limit=5000)
+        assert mock_client.get.call_args[1]["params"]["limit"] == 100
+        await plugin.search_datasets("x", limit=500)
+        assert mock_client.get.call_args[1]["params"]["limit"] == 100
+
+    @pytest.mark.asyncio
+    async def test_group_by_string_coerced_to_list(self):
+        plugin, mock_client = self._plugin(
+            get_return={"total_count": 1, "results": [{"neighborhood": "A", "n": 1}]}
+        )
+        result = await plugin.aggregate_data(
+            "d", metrics={"n": "count(*)"}, group_by="neighborhood"
+        )
+        assert result.get("error") is not True
+        assert mock_client.get.call_args[1]["params"]["group_by"] == "neighborhood"
+
+    @pytest.mark.asyncio
+    async def test_empty_count_rejected(self):
+        plugin, _ = self._plugin()
+        result = await plugin.aggregate_data("d", metrics={"n": "count()"})
+        assert result.get("error") is True
+        assert "metric expression" in result["message"]
