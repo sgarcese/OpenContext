@@ -340,3 +340,21 @@ class TestToolHandlerNamedTuple:
     def test_required_args_stored(self):
         h = ToolHandler(handler=lambda a: None, required_args=("a", "b"))
         assert h.required_args == ("a", "b")
+
+
+class TestBuildWhereClauseIdentifierValidation:
+    """build_where_clause rejects unsafe field names (code-review fix)."""
+
+    def test_malicious_field_name_rejected(self):
+        with pytest.raises(ValueError, match="Invalid filter field name"):
+            BaseOpenDataPlugin.build_where_clause({"a = 1 OR field": "x"})
+
+    def test_field_name_with_quote_rejected(self):
+        with pytest.raises(ValueError, match="Invalid filter field name"):
+            BaseOpenDataPlugin.build_where_clause({"name'; DROP TABLE x--": 1})
+
+    def test_plain_identifiers_still_pass(self):
+        clause = BaseOpenDataPlugin.build_where_clause(
+            {"status": "Open", "_count": 3, "n1": None}
+        )
+        assert clause == "status = 'Open' AND _count = 3 AND n1 IS NULL"
