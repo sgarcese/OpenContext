@@ -51,6 +51,8 @@ plugins:
     city_name: "Your City"
     timeout: 120
     # token: "${ARCGIS_TOKEN}"  # Optional: Bearer token for private items
+    # trusted_service_hosts:      # Extra hosts trusted for Feature Service queries
+    #   - "gis.yourcity.gov"      # (needed when Hub references self-hosted services)
 
   # yamllint disable rule:comments-indentation
   # Custom: Add your own plugins here
