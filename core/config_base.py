@@ -35,8 +35,8 @@ class BasePluginConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    @classmethod
-    def validate_url(cls, v: str) -> str:
+    @staticmethod
+    def validate_url(v: str) -> str:
         """Validate that a URL is well-formed with an http/https scheme.
 
         Args:
