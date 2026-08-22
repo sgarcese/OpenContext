@@ -231,11 +231,7 @@ client/opencontext-client-*
 config.yaml
 examples/
 
-# Local Claude overrides
+# Claude Code local files
+CLAUDE.md
 CLAUDE.local.md
-
-# Terraform variable files (may contain real secrets — use *.tfvars.example as templates)
-terraform/**/*.tfvars
-
-# Claude Code — only personal local overrides are gitignored
-.claude/settings.local.json
+.claude/
