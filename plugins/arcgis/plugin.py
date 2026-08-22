@@ -193,7 +193,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                                 '"type", "tags", "categories", "access"'
                             ),
                         },
-                        "q": {
+                        "query": {
                             "type": "string",
                             "description": "Optional search query to scope the aggregation",
                         },
@@ -266,7 +266,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             Dict mapping tool name (without plugin prefix) to ToolHandler.
         """
         return {
-            "search_datasets": ToolHandler(handler=self._tool_search_datasets),
+            "search_datasets": ToolHandler(
+                handler=self._tool_search_datasets, required_args=("query",)
+            ),
             "get_dataset": ToolHandler(
                 handler=self._tool_get_dataset, required_args=("dataset_id",)
             ),
@@ -299,8 +301,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
     async def _tool_get_aggregations(self, arguments: dict[str, Any]) -> ToolResult:
         field = arguments["field"]
-        q = arguments.get("q")
-        buckets = await self.get_aggregations(field, q)
+        query = arguments.get("query")
+        buckets = await self.get_aggregations(field, query)
         return ToolResult(
             content=[{"type": "text", "text": self._format_aggregations(field, buckets)}],
             success=True,
@@ -408,7 +410,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             )
 
         service_url = self._validate_feature_url(
-            service_url, self.plugin_config.portal_url
+            service_url,
+            self.plugin_config.portal_url,
+            self.plugin_config.trusted_service_hosts,
         )
         service_url = self._ensure_layer_url(service_url)
         meta_url = f"{service_url}?f=json"
@@ -497,7 +501,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
         where_clause = WhereValidator.validate(where)
         service_url = self._validate_feature_url(
-            service_url, self.plugin_config.portal_url
+            service_url,
+            self.plugin_config.portal_url,
+            self.plugin_config.trusted_service_hosts,
         )
         service_url = self._ensure_layer_url(service_url)
         query_url = f"{service_url}/query"
@@ -599,27 +605,37 @@ class ArcGISPlugin(BaseOpenDataPlugin):
     # ── Private helpers ─────────────────────────────────────────────────
 
     @staticmethod
-    def _validate_feature_url(service_url: str, portal_url: str) -> str:
-        """Restrict Feature Service URLs to trusted ArcGIS hosts.
+    def _validate_feature_url(
+        service_url: str,
+        portal_url: str,
+        trusted_hosts: tuple[str, ...] | list[str] = (),
+    ) -> str:
+        """Restrict Feature Service URLs to trusted hosts.
 
         Parses ``service_url`` and requires the scheme to be http/https and
-        the host to either end with ``.arcgis.com`` or equal the configured
-        portal host (case-insensitive). This prevents a crafted dataset
-        record from steering Feature Service queries to arbitrary hosts
-        (SSRF). Ported from thealphacubicle/OpenContext (Feature/security
-        update #37).
+        the host to end with ``.arcgis.com``, equal the configured portal
+        host, or match one of ``trusted_hosts`` (exact host or subdomain,
+        case-insensitive). This prevents a crafted dataset record from
+        steering Feature Service queries to arbitrary hosts (SSRF). Ported
+        from thealphacubicle/OpenContext (Feature/security update #37).
+
+        Hub catalogs commonly reference services self-hosted on city
+        domains; those hosts must be listed in the plugin's
+        ``trusted_service_hosts`` config to be queryable.
 
         Args:
             service_url: Feature Service URL resolved from a dataset record.
             portal_url: Configured portal URL (its host is the allow-listed
                 fallback for self-hosted ArcGIS portals).
+            trusted_hosts: Extra hostnames from ``trusted_service_hosts``
+                config.
 
         Returns:
             The validated ``service_url`` unchanged.
 
         Raises:
             ValueError: If the scheme is not http/https or the host is not
-                a trusted ArcGIS host.
+                trusted.
         """
         parsed = urlparse(service_url)
         if parsed.scheme not in ("http", "https"):
@@ -632,9 +648,14 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             raise ValueError("Feature Service URL must include a hostname")
         if host == portal_host or host.endswith(".arcgis.com"):
             return service_url
+        for trusted in trusted_hosts:
+            trusted = trusted.lower().lstrip(".")
+            if host == trusted or host.endswith(f".{trusted}"):
+                return service_url
         raise ValueError(
             f"Feature Service URL host {host!r} is not trusted "
-            f"(must end with '.arcgis.com' or match portal host {portal_host!r})"
+            f"(must end with '.arcgis.com', match portal host {portal_host!r}, "
+            f"or be listed in trusted_service_hosts)"
         )
 
     @staticmethod
@@ -739,15 +760,12 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         if not records:
             return "No records returned."
 
-        lines = [f"Returned {len(records)} record(s) (limit: {limit}):\n"]
-
-        for i, record in enumerate(records, 1):
-            lines.append(f"Record {i}:")
-            for key, value in record.items():
-                lines.append(f"  {key}: {value}")
-            lines.append("")
-
-        return "\n".join(lines)
+        # ArcGIS records have no internal _id key to skip.
+        return self.format_records(
+            records,
+            header=f"Returned {len(records)} record(s) (limit: {limit}):",
+            skip_keys=frozenset(),
+        )
 
     def _format_aggregations(self, field: str, buckets: list[dict[str, Any]]) -> str:
         if not buckets:

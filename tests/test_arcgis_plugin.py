@@ -235,11 +235,14 @@ class TestExecuteTool:
             new_callable=AsyncMock,
             return_value=[],
         ) as mock_search:
-            # 'q' is no longer a recognized param; query defaults to "".
+            # 'q' is no longer a recognized param; the required 'query'
+            # argument is enforced at dispatch, so old-schema calls fail
+            # loudly instead of silently searching with an empty query.
             result = await plugin.execute_tool("search_datasets", {"q": "test"})
 
-        assert result.success is True
-        mock_search.assert_called_once_with("", 10)
+        assert result.success is False
+        assert "query is required" in result.error_message
+        mock_search.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_execute_tool_get_dataset_missing_id(self, arcgis_config):
@@ -1061,3 +1064,84 @@ class TestAggregations:
 
         buckets = await plugin.get_aggregations("type")
         assert buckets == []
+
+class TestCodeReviewFixes:
+    """Regressions found in code review of the migration + SSRF commits."""
+
+    def _config(self, **overrides):
+        cfg = {"city_name": "TestCity"}
+        cfg.update(overrides)
+        return cfg
+
+    def test_where_keywords_inside_quoted_literals_allowed(self):
+        """Real data values like 'SET' or 'Initial Call' are not SQL keywords."""
+        from plugins.arcgis.where_validator import WhereValidator
+
+        assert WhereValidator.validate("status = 'SET'") == "status = 'SET'"
+        assert (
+            WhereValidator.validate("call_type = 'Initial Call'")
+            == "call_type = 'Initial Call'"
+        )
+        # Escaped quotes inside literals are handled.
+        assert (
+            WhereValidator.validate("name = 'O''Brien DELETE'")
+            == "name = 'O''Brien DELETE'"
+        )
+
+    def test_where_keywords_outside_literals_still_rejected(self):
+        from plugins.arcgis.where_validator import WhereValidator
+
+        with pytest.raises(ValueError, match="Forbidden keyword"):
+            WhereValidator.validate("1=1; DELETE FROM x")
+        with pytest.raises(ValueError, match="Forbidden keyword"):
+            WhereValidator.validate("GRANT ALL ON x")
+
+    def test_trusted_service_hosts_config_allows_city_domain(self):
+        from plugins.arcgis.plugin import ArcGISPlugin
+
+        url = "https://maps2.dcgis.dc.gov/dcgis/rest/services/x/FeatureServer"
+        # Rejected without config.
+        with pytest.raises(ValueError, match="not trusted"):
+            ArcGISPlugin._validate_feature_url(url, "https://hub.arcgis.com")
+        # Allowed when the host (or a parent domain) is trusted.
+        assert (
+            ArcGISPlugin._validate_feature_url(
+                url, "https://hub.arcgis.com", ["maps2.dcgis.dc.gov"]
+            )
+            == url
+        )
+        assert (
+            ArcGISPlugin._validate_feature_url(
+                url, "https://hub.arcgis.com", ["dc.gov"]
+            )
+            == url
+        )
+        # An unrelated trusted entry does not allow it.
+        with pytest.raises(ValueError, match="not trusted"):
+            ArcGISPlugin._validate_feature_url(
+                url, "https://hub.arcgis.com", ["example.com"]
+            )
+
+    @pytest.mark.asyncio
+    async def test_search_datasets_requires_query(self):
+        from plugins.arcgis.plugin import ArcGISPlugin
+
+        plugin = ArcGISPlugin(self._config())
+        plugin._initialized = True
+        result = await plugin.execute_tool("search_datasets", {})
+        assert result.success is False
+        assert "query is required" in result.error_message
+        # Old-schema calls using "q" now fail loudly instead of silently
+        # returning an unfiltered catalog dump.
+        result = await plugin.execute_tool("search_datasets", {"q": "crime"})
+        assert result.success is False
+
+    def test_format_query_results_caps_display(self):
+        from plugins.arcgis.plugin import ArcGISPlugin
+
+        plugin = ArcGISPlugin(self._config())
+        records = [{"a": i} for i in range(50)]
+        text = plugin._format_query_results(records, limit=1000)
+        assert "Record 10:" in text
+        assert "Record 11:" not in text
+        assert "... and 40 more record(s)" in text
