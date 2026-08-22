@@ -16,7 +16,10 @@ OpenContext is a plugin-based framework. Each deployment runs **one** server wit
 
 ```
 core/
-├── interfaces.py       # MCPPlugin, DataPlugin, ToolDefinition
+├── interfaces.py       # Contracts: MCPPlugin, DataPlugin, ToolDefinition
+├── base_plugin.py      # BaseOpenDataPlugin, ToolHandler, HTTP_RETRY
+├── config_base.py      # BasePluginConfig (shared pydantic config + URL validation)
+├── query_validator.py  # BaseQueryValidator (shared SQL/SoQL safety checks)
 ├── plugin_manager.py   # Discovery, loading, routing
 ├── mcp_server.py       # MCP JSON-RPC handler
 ├── validators.py       # Config validation
@@ -24,14 +27,22 @@ core/
 
 server/
 ├── adapters/
-│   └── aws_lambda.py   # Lambda handler entry point
+│   └── aws_lambda.py   # Lambda handler entry point (persistent event loop)
 └── http_handler.py     # HTTP request handling
 
-plugins/                # Built-in (CKAN)
+plugins/                # Built-in providers on the shared base
 ├── ckan/
 │   ├── plugin.py
 │   ├── config_schema.py
 │   └── sql_validator.py
+├── socrata/
+│   ├── plugin.py
+│   ├── config_schema.py
+│   └── soql_validator.py
+├── arcgis/
+│   ├── plugin.py
+│   ├── config_schema.py
+│   └── where_validator.py
 
 custom_plugins/         # User plugins (auto-discovered)
 ├── template/
@@ -57,6 +68,32 @@ Lambda / Local Server
     → Plugin (e.g., CKAN)
     → External API
 ```
+
+## Shared Plugin Base Layer
+
+Provider plugins are decoupled from infrastructure through three shared base
+modules, so each plugin contains only provider-specific logic:
+
+- **`core/base_plugin.py` — `BaseOpenDataPlugin`**: HTTP client lifecycle
+  (`_create_http_client` + automatic cleanup in `shutdown()`), retry policy
+  (`HTTP_RETRY`), portal-error translation (`_raise_http_error`),
+  declarative tool dispatch (`tool_handlers()` returning `ToolHandler`s with
+  `required_args` enforcement — plugins do not write `execute_tool`), capped
+  record formatting (`format_records`), and safe `WHERE`-clause construction
+  (`build_where_clause`, which validates field identifiers).
+- **`core/config_base.py` — `BasePluginConfig`**: shared pydantic model
+  (`enabled`, `city_name`, `timeout`, `extra="forbid"`) plus a reusable
+  `validate_url` field validator.
+- **`core/query_validator.py` — `BaseQueryValidator`**: length cap,
+  `SELECT`-only prefix, forbidden-keyword scan, and multi-statement checks;
+  provider validators subclass it (CKAN SQL, Socrata SoQL) or reuse the
+  keyword scan for WHERE fragments (ArcGIS).
+
+The Lambda adapter (`server/adapters/aws_lambda.py`) maintains a persistent
+event loop across warm invocations, so plugin HTTP clients are created once
+per container rather than once per request.
+
+See [Custom Plugins Guide](CUSTOM_PLUGINS.md) for how to extend this layer.
 
 ## Plugins
 
