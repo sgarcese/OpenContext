@@ -16,7 +16,10 @@ OpenContext is a plugin-based framework. Each deployment runs **one** server wit
 
 ```
 core/
-├── interfaces.py       # MCPPlugin, DataPlugin, ToolDefinition
+├── interfaces.py       # Contracts: MCPPlugin, DataPlugin, ToolDefinition
+├── base_plugin.py      # BaseOpenDataPlugin, ToolHandler, HTTP_RETRY
+├── config_base.py      # BasePluginConfig (shared pydantic config + URL validation)
+├── query_validator.py  # BaseQueryValidator (shared SQL/SoQL safety checks)
 ├── plugin_manager.py   # Discovery, loading, routing
 ├── mcp_server.py       # MCP JSON-RPC handler
 ├── validators.py       # Config validation
