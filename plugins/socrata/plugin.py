@@ -267,7 +267,9 @@ Use get_schema first for column names.""",
             Dict mapping tool name (without plugin prefix) to ToolHandler.
         """
         return {
-            "search_datasets": ToolHandler(handler=self._tool_search_datasets),
+            "search_datasets": ToolHandler(
+                handler=self._tool_search_datasets, required_args=("query",)
+            ),
             "get_dataset": ToolHandler(
                 handler=self._tool_get_dataset, required_args=("dataset_id",)
             ),
