@@ -25,18 +25,50 @@ EXPLORE_API_PATH = "/api/explore/v2.1"
 # Records endpoint page size ceiling enforced by Opendatasoft.
 MAX_RECORDS_LIMIT = 100
 
+
+def _clamp_limit(limit: Any, default: int = MAX_RECORDS_LIMIT) -> int:
+    """Clamp a caller-supplied limit into the API's accepted 1..100 range."""
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        return default
+    return max(1, min(value, MAX_RECORDS_LIMIT))
+
 # Whitelists for ODSQL identifiers and aggregate expressions assembled by
 # aggregate_data, to prevent injection through field names / aliases. Mirrors
 # the CKAN plugin's approach.
 _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _SAFE_METRIC_EXPR = re.compile(
-    r"^(count\(\s*(\*|(distinct\s+)?[a-zA-Z_][a-zA-Z0-9_]{0,63})?\s*\)"
+    r"^(count\(\s*(\*|(distinct\s+)?[a-zA-Z_][a-zA-Z0-9_]{0,63})\s*\)"
     r"|(?:sum|avg|min|max)\(\s*[a-zA-Z_][a-zA-Z0-9_]{0,63}\s*\))$",
     re.IGNORECASE,
 )
 
 # order_by accepts "field", "-field" (descending), or "field ASC|DESC".
 _ORDER_BY_DIRECTION = re.compile(r"^(asc|desc)$", re.IGNORECASE)
+
+# Opendatasoft dataset ids are URL slugs (letters, digits, -, _, and an
+# optional @domain suffix). Interpolated into the request path, so anything
+# outside this pattern (slashes, dots, query characters) is rejected.
+_SAFE_DATASET_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}(@[a-zA-Z0-9_-]{1,63})?$")
+
+
+def _validate_dataset_id(dataset_id: str) -> str:
+    """Validate that ``dataset_id`` is a safe URL path segment.
+
+    Args:
+        dataset_id: Dataset identifier supplied by the caller.
+
+    Returns:
+        The validated dataset id unchanged.
+
+    Raises:
+        ValueError: If the id contains characters that could alter the
+            request path or query string.
+    """
+    if not isinstance(dataset_id, str) or not _SAFE_DATASET_ID.match(dataset_id):
+        raise ValueError(f"Invalid dataset_id: {dataset_id!r}")
+    return dataset_id
 
 
 def _validate_identifier(name: str) -> None:
@@ -443,7 +475,7 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         escaped = query.replace("\\", "\\\\").replace('"', '\\"')
         response = await self._call_api(
             "/catalog/datasets",
-            {"where": f'search("{escaped}")', "limit": limit},
+            {"where": f'search("{escaped}")', "limit": _clamp_limit(limit, default=10)},
         )
         return response.get("results", [])
 
@@ -456,6 +488,7 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         Returns:
             Dataset metadata dictionary.
         """
+        _validate_dataset_id(dataset_id)
         return await self._call_api(f"/catalog/datasets/{dataset_id}")
 
     async def get_schema(self, dataset_id: str) -> list[dict[str, Any]]:
@@ -494,7 +527,7 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         Raises:
             ValueError: If a clause fails ODSQL validation.
         """
-        params: dict[str, Any] = {"limit": min(int(limit), MAX_RECORDS_LIMIT)}
+        params: dict[str, Any] = {"limit": _clamp_limit(limit)}
 
         validated_where = ODSQLValidator.validate_clause(where or "", "where")
         if validated_where:
@@ -508,6 +541,7 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         if validated_order:
             params["order_by"] = validated_order
 
+        _validate_dataset_id(dataset_id)
         return await self._call_api(f"/catalog/datasets/{dataset_id}/records", params)
 
     async def query_data(
@@ -527,9 +561,44 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         Returns:
             List of data records.
         """
-        where = self.build_where_clause(filters) if filters else ""
+        where = self._build_odsql_where(filters) if filters else ""
         result = await self._query_records(resource_id, where=where, limit=limit)
         return result.get("results", [])
+
+    @staticmethod
+    def _build_odsql_where(filters: dict[str, Any]) -> str:
+        """Build an ODSQL ``where`` clause from a field/value filter dict.
+
+        Unlike the base :meth:`build_where_clause` (SQL convention of doubling
+        single quotes), ODSQL string literals are double-quoted with
+        backslash escapes, so values are rendered as ``field = "value"``.
+        Field names must be safe identifiers.
+
+        Args:
+            filters: Mapping of field name to filter value.
+
+        Returns:
+            The ``where`` clause body, or an empty string when ``filters``
+            is empty.
+
+        Raises:
+            ValueError: If a field name is not a safe identifier.
+        """
+        if not filters:
+            return ""
+        conditions: list[str] = []
+        for field, value in filters.items():
+            _validate_identifier(field)
+            if isinstance(value, str):
+                escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+                conditions.append(f'{field} = "{escaped}"')
+            elif value is None:
+                conditions.append(f"{field} is null")
+            elif isinstance(value, bool):
+                conditions.append(f"{field} = {str(value).lower()}")
+            else:
+                conditions.append(f"{field} = {value}")
+        return " and ".join(conditions)
 
     async def aggregate_data(
         self,
@@ -564,6 +633,10 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         try:
             if not isinstance(metrics, dict) or not metrics:
                 raise ValueError("metrics must be a non-empty object")
+            # A bare string is a common client slip for a one-element list;
+            # iterating it would validate each character individually.
+            if isinstance(group_by, str):
+                group_by = [group_by]
             for field in group_by:
                 _validate_identifier(field)
             for alias, expr in metrics.items():
@@ -611,6 +684,7 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
             params["order_by"] = order_clause
 
         try:
+            _validate_dataset_id(dataset_id)
             response = await self._call_api(
                 f"/catalog/datasets/{dataset_id}/records", params
             )
@@ -770,7 +844,10 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         return "\n".join(lines)
 
     def _format_query_results(
-        self, records: list[dict[str, Any]], total_count: int | None = None
+        self,
+        records: list[dict[str, Any]],
+        total_count: int | None = None,
+        max_display: int = MAX_RECORDS_LIMIT,
     ) -> str:
         """Format record query results for user display."""
         if not records:
@@ -781,10 +858,13 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
             header += f" (of {total_count} matching record(s))"
         header += ":"
 
-        return self.format_records(records, max_display=10, header=header)
+        return self.format_records(records, max_display=max_display, header=header)
 
     def _format_aggregate_results(
-        self, records: list[dict[str, Any]], fields: list[str]
+        self,
+        records: list[dict[str, Any]],
+        fields: list[str],
+        max_display: int = MAX_RECORDS_LIMIT,
     ) -> str:
         """Format aggregation results for user display."""
         if not records:
@@ -795,7 +875,7 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
             header_lines.append(f"Fields: {', '.join(fields)}")
 
         return self.format_records(
-            records, max_display=10, header="\n".join(header_lines)
+            records, max_display=max_display, header="\n".join(header_lines)
         )
 
     def _format_categories(self, categories: list[Any]) -> str:

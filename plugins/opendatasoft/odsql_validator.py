@@ -13,12 +13,12 @@ import re
 
 from core.query_validator import BaseQueryValidator
 
-# A single-quoted ODSQL string literal, with '' as the escaped quote.
-_SINGLE_QUOTED_LITERAL = re.compile(r"'(?:[^']|'')*'")
-
-# A double-quoted ODSQL string literal, with backslash escapes (ODSQL uses
-# double quotes for search("...") arguments and plain string comparisons).
-_DOUBLE_QUOTED_LITERAL = re.compile(r'"(?:[^"\\]|\\.)*"')
+# A single- or double-quoted ODSQL string literal, with backslash escapes
+# (ODSQL escapes quotes with a backslash, not by doubling). One alternation
+# matched in a single left-to-right pass, so an apostrophe inside a
+# double-quoted literal cannot open a bogus single-quoted span (and vice
+# versa).
+_QUOTED_LITERAL = re.compile(r"'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
 
 
 class ODSQLValidator(BaseQueryValidator):
@@ -37,8 +37,7 @@ class ODSQLValidator(BaseQueryValidator):
         Returns:
             The clause with all quoted literals blanked out.
         """
-        structural = _SINGLE_QUOTED_LITERAL.sub("''", clause)
-        return _DOUBLE_QUOTED_LITERAL.sub('""', structural)
+        return _QUOTED_LITERAL.sub('""', clause)
 
     @classmethod
     def validate_clause(cls, clause: str, clause_name: str = "where") -> str:

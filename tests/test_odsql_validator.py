@@ -113,3 +113,18 @@ class TestStripLiterals:
         assert "DROP" not in stripped
         assert "DELETE" not in stripped
         assert "a =" in stripped and "b =" in stripped
+
+
+class TestStripLiteralsSinglePass:
+    """An apostrophe inside a double-quoted literal must not open a bogus
+    single-quoted span that hides structural keywords (review finding)."""
+
+    def test_keyword_after_apostrophe_in_double_quotes_rejected(self):
+        with pytest.raises(ValueError, match="Forbidden keyword"):
+            ODSQLValidator.validate_clause(
+                'x = "a\'" and DROP TABLE t and y = "\'b"', "where"
+            )
+
+    def test_apostrophes_inside_double_quotes_still_allowed(self):
+        clause = 'name = "O\'Brien" and note = "won\'t DELETE me"'
+        assert ODSQLValidator.validate_clause(clause, "where") == clause
