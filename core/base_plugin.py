@@ -9,6 +9,7 @@ the remaining ``DataPlugin`` abstract methods.
 """
 
 import logging
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -24,6 +25,11 @@ from core.config_base import BasePluginConfig
 from core.interfaces import DataPlugin, ToolResult
 
 logger = logging.getLogger(__name__)
+
+# Safe SQL identifier: letters, digits, underscores; must not start with a
+# digit; max 64 chars. Used by build_where_clause to reject field names that
+# could smuggle SQL fragments.
+_SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 
 HTTP_RETRY = retry(
     stop=stop_after_attempt(3),
@@ -257,13 +263,9 @@ class BaseOpenDataPlugin(DataPlugin):
 
         Strings are escaped by doubling single quotes, ``None`` becomes
         ``IS NULL``, and other values are rendered as-is. Conditions are
-        joined with ``AND``.
-
-        Warning:
-            Field names are interpolated directly into the clause without
-            escaping. Callers MUST validate field identifiers (e.g. against
-            a known schema) before calling this method to avoid SQL
-            injection through field names.
+        joined with ``AND``. Field names must be plain identifiers
+        (letters, digits, underscores, not starting with a digit); anything
+        else raises so SQL cannot be smuggled in through field names.
 
         Args:
             filters: Mapping of field name to filter value.
@@ -271,11 +273,16 @@ class BaseOpenDataPlugin(DataPlugin):
         Returns:
             The ``WHERE`` clause body (without the leading ``WHERE``
             keyword), or an empty string when ``filters`` is empty.
+
+        Raises:
+            ValueError: If a field name is not a safe identifier.
         """
         if not filters:
             return ""
         conditions: list[str] = []
         for field, value in filters.items():
+            if not isinstance(field, str) or not _SAFE_IDENTIFIER.match(field):
+                raise ValueError(f"Invalid filter field name: {field!r}")
             if isinstance(value, str):
                 escaped = value.replace("'", "''")
                 conditions.append(f"{field} = '{escaped}'")
