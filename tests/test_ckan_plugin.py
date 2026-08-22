@@ -920,7 +920,11 @@ class TestAggregateDataSecurityHardening:
             order_by="status; DROP TABLE users",
         )
         assert result.get("error") is True
-        assert "identifier" in result["message"].lower()
+        # Rejected either as a malformed order_by or as a bad identifier.
+        assert (
+            "identifier" in result["message"].lower()
+            or "order_by" in result["message"].lower()
+        )
 
     @pytest.mark.asyncio
     async def test_order_by_with_leading_dash_passes_validation(self, ckan_config):
@@ -945,11 +949,9 @@ class TestAggregateDataSecurityHardening:
             # Should not be rejected by identifier validation; downstream call
             # returns success dict (mocked CKAN API).
             assert result.get("error") is not True
-            # Confirm the SQL was built with an ORDER BY clause (the leading '-'
-            # is stripped only for validation; the original order_by string is
-            # preserved in the generated SQL).
+            # The leading '-' compiles to a descending ORDER BY.
             sent_sql = mock_client.post.call_args[1]["json"]["sql"]
-            assert "ORDER BY -status" in sent_sql
+            assert "ORDER BY status DESC" in sent_sql
 
     @pytest.mark.asyncio
     async def test_valid_aggregate_passes_validation(self, ckan_config):
@@ -974,3 +976,101 @@ class TestAggregateDataSecurityHardening:
                 order_by="neighborhood",
             )
             assert result.get("error") is not True
+
+
+class TestAggregateDataUsability:
+    """Regressions from code review: valid inputs the hardening over-rejected."""
+
+    @pytest.fixture
+    def ckan_config(self):
+        return {
+            "base_url": "https://data.example.com",
+            "portal_url": "https://data.example.com",
+            "city_name": "TestCity",
+        }
+
+    def _make_plugin_with_capture(self, ckan_config):
+        plugin = CKANPlugin(ckan_config)
+        plugin._initialized = True
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.json.return_value = {
+            "success": True,
+            "result": {"records": [], "fields": []},
+        }
+        mock_response.raise_for_status = Mock()
+        mock_client.post = AsyncMock(return_value=mock_response)
+        plugin.client = mock_client
+        return plugin, mock_client
+
+    def _sent_sql(self, mock_client):
+        return mock_client.post.call_args[1]["json"]["sql"]
+
+    @pytest.mark.asyncio
+    async def test_count_field_and_count_distinct_allowed(self, ckan_config):
+        plugin, mock_client = self._make_plugin_with_capture(ckan_config)
+        result = await plugin.aggregate_data(
+            resource_id="abc",
+            group_by=["status"],
+            metrics={"n": "count(id)", "uniq": "count(distinct id)"},
+        )
+        assert result.get("error") is not True
+        assert "count(id) as n" in self._sent_sql(mock_client)
+
+    @pytest.mark.asyncio
+    async def test_order_by_field_desc_suffix(self, ckan_config):
+        plugin, mock_client = self._make_plugin_with_capture(ckan_config)
+        result = await plugin.aggregate_data(
+            resource_id="abc",
+            group_by=["status"],
+            metrics={"n": "count(*)"},
+            order_by="status DESC",
+        )
+        assert result.get("error") is not True
+        assert "ORDER BY status DESC" in self._sent_sql(mock_client)
+
+    @pytest.mark.asyncio
+    async def test_having_metric_alias_substituted(self, ckan_config):
+        """HAVING on a metric alias compiles to the underlying expression
+        (PostgreSQL does not allow SELECT aliases in HAVING)."""
+        plugin, mock_client = self._make_plugin_with_capture(ckan_config)
+        result = await plugin.aggregate_data(
+            resource_id="abc",
+            group_by=["status"],
+            metrics={"cnt": "count(*)"},
+            having={"cnt": 5},
+        )
+        assert result.get("error") is not True
+        assert "HAVING count(*) > 5" in self._sent_sql(mock_client)
+
+    @pytest.mark.asyncio
+    async def test_having_stringified_number_defaults_to_gt(self, ckan_config):
+        plugin, mock_client = self._make_plugin_with_capture(ckan_config)
+        result = await plugin.aggregate_data(
+            resource_id="abc",
+            group_by=["status"],
+            metrics={"cnt": "count(*)"},
+            having={"count(*)": "5"},
+        )
+        assert result.get("error") is not True
+        assert "HAVING count(*) > 5" in self._sent_sql(mock_client)
+
+    @pytest.mark.asyncio
+    async def test_having_free_text_value_rejected(self, ckan_config):
+        plugin, _ = self._make_plugin_with_capture(ckan_config)
+        result = await plugin.aggregate_data(
+            resource_id="abc",
+            group_by=["status"],
+            metrics={"cnt": "count(*)"},
+            having={"count(*)": "5; DROP TABLE x"},
+        )
+        assert result.get("error") is True
+        assert "HAVING" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_search_datasets_requires_query(self, ckan_config):
+        plugin = CKANPlugin(ckan_config)
+        plugin._initialized = True
+        result = await plugin.execute_tool("search_datasets", {})
+        assert result.success is False
+        assert "query is required" in result.error_message
