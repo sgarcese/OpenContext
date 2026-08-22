@@ -21,9 +21,17 @@ logger = logging.getLogger(__name__)
 # Ported from thealphacubicle/OpenContext (Feature/security update #37).
 _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 _SAFE_METRIC_EXPR = re.compile(
-    r"^(count\(\s*\*?\s*\)|(?:sum|avg|min|max|stddev|variance)\(\s*[a-zA-Z_][a-zA-Z0-9_]{0,63}\s*\))$",
+    r"^(count\(\s*(\*|(distinct\s+)?[a-zA-Z_][a-zA-Z0-9_]{0,63})?\s*\)"
+    r"|(?:sum|avg|min|max|stddev|variance)\(\s*[a-zA-Z_][a-zA-Z0-9_]{0,63}\s*\))$",
     re.IGNORECASE,
 )
+
+# HAVING string values may carry their own comparison operator (e.g. ">= 5");
+# anything else must be a plain number.
+_SAFE_HAVING_VALUE = re.compile(r"^\s*(=|!=|<>|>=|<=|>|<)?\s*-?\d+(\.\d+)?\s*$")
+
+# ORDER BY accepts "field", "-field" (descending), or "field ASC|DESC".
+_ORDER_BY_DIRECTION = re.compile(r"^(asc|desc)$", re.IGNORECASE)
 
 
 def _validate_identifier(name: str) -> None:
@@ -308,6 +316,7 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
         return {
             "search_datasets": ToolHandler(
                 handler=self._tool_search_datasets,
+                required_args=("query",),
             ),
             "get_dataset": ToolHandler(
                 handler=self._tool_get_dataset,
@@ -567,12 +576,28 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
                     _validate_identifier(field)
             if having:
                 for expr in having:
-                    # HAVING keys are aggregate expressions like "count(*)";
-                    # validate them as metric expressions.
-                    _validate_metric_expr(expr)
+                    # HAVING keys are aggregate expressions like "count(*)" or
+                    # declared metric aliases (substituted below, since
+                    # PostgreSQL does not allow SELECT aliases in HAVING).
+                    if expr not in metrics:
+                        _validate_metric_expr(expr)
+            order_field = None
+            order_direction = ""
             if order_by:
-                # order_by may be prefixed with '-' for descending.
-                order_field = order_by[1:] if order_by.startswith("-") else order_by
+                # Accept "field", "-field" (descending), or "field ASC|DESC".
+                parts = order_by.strip().split()
+                if len(parts) == 2 and _ORDER_BY_DIRECTION.match(parts[1]):
+                    order_field, order_direction = parts[0], parts[1].upper()
+                elif len(parts) == 1:
+                    order_field = parts[0]
+                    if order_field.startswith("-"):
+                        order_field = order_field[1:]
+                        order_direction = "DESC"
+                else:
+                    raise ValueError(
+                        f"Invalid order_by: {order_by!r} "
+                        "(expected 'field', '-field', or 'field ASC|DESC')"
+                    )
                 _validate_identifier(order_field)
         except ValueError as e:
             return {"error": True, "message": str(e)}
@@ -598,16 +623,33 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
         if having:
             conditions = []
             for expr, value in having.items():
+                # Metric aliases are substituted with their expression:
+                # PostgreSQL does not allow SELECT aliases in HAVING.
+                sql_expr = metrics.get(expr, expr)
                 if isinstance(value, str):
-                    # Value carries its own operator (e.g. ">= 5").
-                    conditions.append(f"{expr} {value}")
+                    if not _SAFE_HAVING_VALUE.match(value):
+                        return {
+                            "error": True,
+                            "message": (
+                                f"Invalid HAVING value: {value!r} (expected a "
+                                "number, optionally prefixed with a comparison "
+                                "operator, e.g. '>= 5')"
+                            ),
+                        }
+                    value = value.strip()
+                    # A bare numeric string defaults to the ">" operator.
+                    if value[0].isdigit() or value[0] == "-":
+                        value = f"> {value}"
+                    conditions.append(f"{sql_expr} {value}")
                 else:
                     # Numeric value: default to the documented ">" operator.
-                    conditions.append(f"{expr} > {value}")
+                    conditions.append(f"{sql_expr} > {value}")
             having_clause = "HAVING " + " AND ".join(conditions)
 
         # ORDER BY
-        order_clause = f"ORDER BY {order_by}" if order_by else ""
+        order_clause = ""
+        if order_field:
+            order_clause = f"ORDER BY {order_field} {order_direction}".strip()
 
         # Build SQL
         sql = f'SELECT {select_clause} FROM "{resource_id}" {where_clause} {group_clause} {having_clause} {order_clause} LIMIT {limit}'.strip()
