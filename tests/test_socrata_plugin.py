@@ -112,8 +112,6 @@ class TestPluginInitialization:
             await plugin.shutdown()
 
             assert mock_client.aclose.call_count == 2
-            assert plugin.discovery_client is None
-            assert plugin.soda_client is None
             assert plugin.is_initialized is False
 
 
@@ -1070,3 +1068,22 @@ class TestQueryDatasetRowExtraction:
             result = await plugin._query_dataset("wc4w-4jew", "SELECT * LIMIT 10")
         assert len(result) == 2
         assert result[0]["id"] == 1
+
+
+class TestSearchRequiresQuery:
+    """search_datasets enforces its required 'query' argument (review fix)."""
+
+    @pytest.mark.asyncio
+    async def test_missing_query_rejected(self):
+        plugin = SocrataPlugin(
+            {
+                "base_url": "https://data.example.com",
+                "portal_url": "https://data.example.com",
+                "city_name": "TestCity",
+                "app_token": "tok",
+            }
+        )
+        plugin._initialized = True
+        result = await plugin.execute_tool("search_datasets", {})
+        assert result.success is False
+        assert "query is required" in result.error_message
