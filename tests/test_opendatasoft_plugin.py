@@ -672,7 +672,8 @@ class TestAggregateData:
         params = mock_client.get.call_args[1]["params"]
         assert "group_by" not in params
         assert params["select"] == "count(*) as total"
-        assert params["limit"] == 100
+        # Global aggregates request a single row (API repeats them per record).
+        assert params["limit"] == 1
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -903,3 +904,32 @@ class TestPluginMetadata:
         assert plugin.plugin_name == "opendatasoft"
         assert plugin.plugin_type.value == "open_data"
         assert plugin.plugin_version == "1.0.0"
+
+
+class TestAggregateWithoutGroupBy:
+    """A global aggregate (no group_by) requests a single row: the Explore
+    API otherwise repeats the aggregate once per underlying record."""
+
+    @pytest.mark.asyncio
+    async def test_limit_forced_to_one(self):
+        plugin = OpendatasoftPlugin(
+            {
+                "base_url": "https://data.example.com",
+                "portal_url": "https://data.example.com",
+                "city_name": "TestCity",
+            }
+        )
+        plugin._initialized = True
+        mock_client = AsyncMock()
+        mock_response = Mock()
+        mock_response.json.return_value = {"total_count": 1728, "results": [{"n": 1728}]}
+        mock_response.raise_for_status = Mock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        plugin.client = mock_client
+
+        result = await plugin.aggregate_data("ds", metrics={"n": "count(*)"})
+        assert result.get("error") is not True
+        assert mock_client.get.call_args[1]["params"]["limit"] == 1
+
+        await plugin.aggregate_data("ds", metrics={"n": "count(*)"}, group_by=["f"], limit=50)
+        assert mock_client.get.call_args[1]["params"]["limit"] == 50

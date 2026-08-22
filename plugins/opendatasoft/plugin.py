@@ -599,7 +599,9 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         select_parts = [f"{expr} as {alias}" for alias, expr in metrics.items()]
         params: dict[str, Any] = {
             "select": ", ".join(select_parts),
-            "limit": limit,
+            # Without group_by the Explore API repeats the global aggregate
+            # once per underlying record, so a single row is the whole answer.
+            "limit": limit if group_by else 1,
         }
         if group_by:
             params["group_by"] = ",".join(group_by)
