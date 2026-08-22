@@ -233,3 +233,8 @@ examples/
 terraform/aws/secrets.*.tfvars
 .env.staging
 .env.prod
+
+# Claude Code local files
+CLAUDE.md
+CLAUDE.local.md
+.claude/
