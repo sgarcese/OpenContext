@@ -8,7 +8,12 @@ previously lacked) while keeping the ArcGIS-specific public API
 ``validate(where) -> str``.
 """
 
+import re
+
 from core.query_validator import BaseQueryValidator
+
+# A single-quoted SQL string literal, with '' as the escaped quote.
+_QUOTED_LITERAL = re.compile(r"'(?:[^']|'')*'")
 
 
 class WhereValidator(BaseQueryValidator):
@@ -40,8 +45,12 @@ class WhereValidator(BaseQueryValidator):
         if not where:
             return "1=1"
 
-        forbidden = cls.scan_forbidden_keywords(where)
+        # Scan only the structural SQL, not quoted string literals: values
+        # like status = 'SET' or call_type = 'Initial Call' are legitimate
+        # data, and keywords are only dangerous outside quotes.
+        structural = _QUOTED_LITERAL.sub("''", where)
+        forbidden = cls.scan_forbidden_keywords(structural)
         if forbidden:
-            raise ValueError(f"Forbidden keyword detected in WHERE clause: {forbidden}")
+            raise ValueError(f"{forbidden} in WHERE clause")
 
         return where

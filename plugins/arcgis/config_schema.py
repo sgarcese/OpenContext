@@ -22,6 +22,16 @@ class ArcGISPluginConfig(BasePluginConfig):
     token: str | None = Field(
         None, description="Optional Bearer token for authenticated requests"
     )
+    trusted_service_hosts: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Extra hostnames trusted for Feature Service queries, in addition "
+            "to *.arcgis.com and the portal host. Needed when a Hub catalog "
+            "references services self-hosted on city domains "
+            "(e.g. ['maps2.dcgis.dc.gov']). Entries match the exact host or "
+            "any of its subdomains."
+        ),
+    )
 
     # Preserve the historical ArcGIS default of 120 seconds (the base default
     # is 30.0); widen the bound so existing configs that used 120 still
