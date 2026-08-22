@@ -1,6 +1,6 @@
 # Built-in Plugins Reference
 
-OpenContext includes built-in plugins for CKAN and Socrata open data portals.
+OpenContext includes built-in plugins for CKAN, Socrata, and Opendatasoft open data portals.
 
 ## CKAN Plugin
 
@@ -114,6 +114,89 @@ This plugin uses two Socrata API layers:
 - **SODA3** (portal domain) - Dataset metadata, schema, data queries
 
 See [Socrata developer documentation](https://dev.socrata.com/) for details.
+
+## Opendatasoft Plugin
+
+For Opendatasoft-based open data portals using the Explore API v2.1 (e.g., data.longbeach.gov, public.opendatasoft.com).
+
+**Note:** Public Opendatasoft portals require no credentials. An API key is only needed for private datasets.
+
+### Configuration
+
+```yaml
+plugins:
+  opendatasoft:
+    enabled: true
+    base_url: "https://data.longbeach.gov"    # Portal API base URL
+    portal_url: "https://data.longbeach.gov"  # Public portal URL
+    city_name: "Long Beach"                   # City/organization name
+    timeout: 30.0                             # HTTP timeout (default: 30)
+    api_key: "${ODS_API_KEY}"                 # Optional: private datasets only
+```
+
+### Tools
+
+- `opendatasoft__search_datasets(query, limit)` - Search the portal catalog (full-text via ODSQL `search()`)
+- `opendatasoft__get_dataset(dataset_id)` - Get dataset metadata (title, description, theme, keywords, record count)
+- `opendatasoft__get_schema(dataset_id)` - Get field names, types and descriptions for ODSQL clauses
+- `opendatasoft__query_data(dataset_id, where, select, order_by, limit)` - Query records with ODSQL (limit capped at 100)
+- `opendatasoft__aggregate_data(dataset_id, metrics, group_by, where, order_by, limit)` - Aggregate records with GROUP BY
+- `opendatasoft__list_categories()` - List portal themes with dataset counts
+
+### ODSQL notes
+
+The Explore API takes ODSQL fragments rather than full SQL statements:
+
+- String literals use double quotes: `status = "Open"`. Single quotes also work.
+- Full-text matching uses `search("text")`; wildcards use `like`, e.g. `name like "North*"`.
+- `select` supports fields and aggregates — `count(*)`, `count(field)`, `count(distinct field)`, `sum()`, `avg()`, `min()`, `max()` — each with an `as alias`.
+- `group_by` takes a comma-separated list of field names.
+- `order_by` takes `field ASC|DESC`, and may reference a `select` alias.
+- The records endpoint returns at most 100 rows per call.
+
+Clauses are validated before dispatch: forbidden SQL keywords are rejected outside of quoted literals (keywords inside literals are treated as data), and `aggregate_data` whitelists group-by fields, metric aliases and aggregate expressions.
+
+### Examples
+
+**Search datasets:**
+```
+Search for datasets about police calls in Long Beach
+```
+
+**Get dataset:**
+```
+Get details about the police-calls-for-service dataset
+```
+
+**Get schema (call before query_data):**
+```
+Get schema for dataset police-calls-for-service
+```
+
+**Query data:**
+```
+Query police-calls-for-service where call_type = "Noise", ordered by received DESC
+```
+
+**Aggregate data:**
+```
+Count police calls by call_type in Long Beach
+```
+
+**List categories:**
+```
+List all dataset themes on Long Beach's open data portal
+```
+
+### Opendatasoft API
+
+This plugin uses the Explore API v2.1 (`{base_url}/api/explore/v2.1`):
+- `/catalog/datasets` - Catalog list/search
+- `/catalog/datasets/{dataset_id}` - Dataset metadata including fields
+- `/catalog/datasets/{dataset_id}/records` - Record queries and aggregations
+- `/catalog/facets?facet=theme` - Portal-wide themes with counts
+
+See [Opendatasoft Explore API documentation](https://help.opendatasoft.com/apis/ods-explore-v2/) for details.
 
 ## Custom Plugins
 
