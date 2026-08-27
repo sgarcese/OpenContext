@@ -1335,7 +1335,7 @@ class TestSearchDatasetsCount:
 
 
 class TestListDatasets:
-    CFG = {
+    CFG: ClassVar[dict] = {
         "base_url": "https://data.example.com",
         "portal_url": "https://data.example.com",
         "city_name": "TestCity",
@@ -1392,7 +1392,7 @@ class TestListDatasets:
 
 
 class TestGetCatalogStats:
-    CFG = {
+    CFG: ClassVar[dict] = {
         "base_url": "https://data.example.com",
         "portal_url": "https://data.example.com",
         "city_name": "TestCity",
