@@ -1091,3 +1091,111 @@ class TestSearchRequiresQuery:
         result = await plugin.execute_tool("search_datasets", {})
         assert result.success is False
         assert "query is required" in result.error_message
+
+
+class TestMetadataEnrichment:
+    @pytest.fixture
+    def socrata_config(self):
+        return {
+            "base_url": "https://data.cityofboston.gov",
+            "portal_url": "https://data.cityofboston.gov",
+            "city_name": "Boston",
+            "app_token": "test-app-token-123",
+        }
+
+    @pytest.fixture
+    def plugin(self, socrata_config):
+        return SocrataPlugin(socrata_config)
+
+    def test_format_dataset_surfaces_views_metadata(self, plugin):
+        dataset = {
+            "id": "abcd-1234",
+            "name": "311 Service Requests",
+            "description": "All 311 calls",
+            "createdAt": 1420070400,
+            "publicationDate": 1420156800,
+            "viewLastModified": 1735689600,
+            "rowsUpdatedAt": 1735776000,
+            "rowCount": 500000,
+            "columns": [{"name": "a"}, {"name": "b"}, {"name": "c"}],
+            "downloadCount": 42,
+            "viewCount": 9001,
+            "provenance": "official",
+            "attribution": "City of Boston",
+            "attributionLink": "https://www.boston.gov/311",
+            "license": {
+                "name": "Public Domain",
+                "termsLink": "https://evil.example.org/terms",
+            },
+            "licenseId": "PUBLIC_DOMAIN",
+            "category": "Public Safety",
+            "tags": ["service", "311"],
+        }
+        out = plugin._format_dataset(dataset)
+        assert "Source: City of Boston (external: www.boston.gov)" in out
+        assert (
+            "License: Public Domain (PUBLIC_DOMAIN) — (external: evil.example.org)"
+            in out
+        )
+        assert "evil.example.org/terms" not in out
+        assert (
+            "Created: 2015-01-01 | Published: 2015-01-02 | "
+            "Metadata modified: 2025-01-01 | Rows updated: 2025-01-02"
+        ) in out
+        assert (
+            "Rows: 500000 | Columns: 3 | Downloads: 42 | Views: 9001 | Provenance: official"
+            in out
+        )
+        assert "Category: Public Safety" in out
+        assert "Tags: service, 311" in out
+        assert "Portal URL: https://data.cityofboston.gov/d/abcd-1234" in out
+
+    def test_format_dataset_omits_missing_fields(self, plugin):
+        out = plugin._format_dataset({"id": "abcd-1234", "name": "X"})
+        assert "License" not in out
+        assert "Created" not in out
+        assert "Rows" not in out
+        assert "N/A" not in out
+
+    def test_search_results_header_and_facts(self, plugin):
+        hits = [
+            {
+                "resource": {
+                    "id": "abcd-1234",
+                    "name": "Budget",
+                    "updatedAt": "2026-03-04T10:00:00.000Z",
+                    "columns_name": ["a", "b"],
+                    "download_count": 5,
+                    "attribution": "Finance Dept",
+                },
+                "classification": {"domain_category": "Finance"},
+            }
+        ]
+        out = plugin._format_search_results(hits, total=57)
+        assert out.startswith(
+            "Found 57 matching dataset(s) in Boston's open data portal (showing 1-1):"
+        )
+        assert (
+            "Modified: 2026-03-04 | Columns: 2 | Downloads: 5 | Source: Finance Dept"
+            in out
+        )
+        assert "Category: Finance" in out
+
+    @pytest.mark.asyncio
+    async def test_search_tool_uses_result_set_size(self, socrata_config):
+        plugin = SocrataPlugin(socrata_config)
+        with patch.object(
+            plugin,
+            "_discovery_search",
+            new_callable=AsyncMock,
+            return_value={
+                "resultSetSize": 120,
+                "results": [{"resource": {"id": "abcd-1234", "name": "A"}}],
+            },
+        ) as mock_search:
+            result = await plugin.execute_tool(
+                "search_datasets", {"query": "a", "limit": 1}
+            )
+        assert result.success
+        assert "Found 120 matching dataset(s)" in result.content[0]["text"]
+        mock_search.assert_called_once_with({"q": "a", "limit": 1})

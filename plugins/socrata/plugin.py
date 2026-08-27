@@ -305,9 +305,18 @@ Use get_schema first for column names.""",
     async def _tool_search_datasets(self, arguments: Dict[str, Any]) -> ToolResult:
         query = arguments.get("query", "")
         limit = arguments.get("limit", 10)
-        datasets = await self.search_datasets(query, limit)
+        result = await self._discovery_search({"q": query, "limit": limit})
+        datasets = result.get("results", []) or []
+        total = result.get("resultSetSize")
         return ToolResult(
-            content=[{"type": "text", "text": self._format_search_results(datasets)}],
+            content=[
+                {
+                    "type": "text",
+                    "text": self._format_search_results(
+                        datasets, total=total if isinstance(total, int) else None
+                    ),
+                }
+            ],
             success=True,
         )
 
@@ -326,7 +335,9 @@ Use get_schema first for column names.""",
         )
 
     async def _tool_query_dataset(self, arguments: Dict[str, Any]) -> ToolResult:
-        data = await self._query_dataset(arguments["dataset_id"], arguments["soql_query"])
+        data = await self._query_dataset(
+            arguments["dataset_id"], arguments["soql_query"]
+        )
         display_limit = self._parse_soql_limit(arguments["soql_query"], default=100)
         return ToolResult(
             content=[
@@ -373,8 +384,16 @@ Use get_schema first for column names.""",
         Returns:
             List of dataset metadata dictionaries
         """
-        response = await self._call_discovery_api({"q": query, "limit": limit})
-        return response.get("results", [])
+        result = await self._discovery_search({"q": query, "limit": limit})
+        return result.get("results", []) or []
+
+    async def _discovery_search(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Call the Discovery API and return the full envelope.
+
+        The envelope carries ``resultSetSize`` (catalog-wide hit count) in
+        addition to ``results``.
+        """
+        return await self._call_discovery_api(params) or {}
 
     async def get_dataset(self, dataset_id: str) -> Dict[str, Any]:
         """Get detailed metadata for a specific dataset.
@@ -559,33 +578,58 @@ Use get_schema first for column names.""",
             logger.error(f"Health check failed: {e}")
             return False
 
-    def _format_search_results(self, datasets: List[Dict[str, Any]]) -> str:
-        """Format search results for user display."""
+    def _format_search_results(
+        self, datasets: List[Dict[str, Any]], *, total: Optional[int] = None
+    ) -> str:
+        """Format search results for user display.
+
+        Args:
+            datasets: Discovery API hits.
+            total: Catalog-wide hit count (``resultSetSize``), if known.
+        """
         if not datasets:
             return f"No datasets found in {self.plugin_config.city_name}'s open data portal."
 
-        lines = [
-            f"Found {len(datasets)} dataset(s) in {self.plugin_config.city_name}'s open data portal:\n"
-        ]
+        lines = [self.format_search_header(total, len(datasets)), ""]
 
         for i, item in enumerate(datasets, 1):
             resource = item.get("resource", item)
+            classification = item.get("classification") or {}
             name = self.portal_line(resource.get("name"), default="Untitled")
             dataset_id = self.safe_id(resource.get("id"))
             description = self.portal_line(
                 resource.get("description"), max_len=100, default="No description"
             )
-            category = self.portal_line(resource.get("category"))
+            category = self.portal_line(
+                resource.get("category") or classification.get("domain_category")
+            )
+            modified = self.short_date(resource.get("updatedAt"))
+            columns = resource.get("columns_name")
+            downloads = resource.get("download_count")
+            attribution = self.portal_line(resource.get("attribution"))
 
             lines.append(f"{i}. {name}")
             lines.append(f"   ID: {dataset_id}")
+            facts = []
+            if modified:
+                facts.append(f"Modified: {modified}")
+            if isinstance(columns, list):
+                facts.append(f"Columns: {len(columns)}")
+            if isinstance(downloads, int):
+                facts.append(f"Downloads: {downloads}")
+            if attribution:
+                facts.append(f"Source: {attribution}")
+            if facts:
+                lines.append("   " + " | ".join(facts))
             lines.append(f"   Description: {description}")
             if category:
                 lines.append(f"   Category: {category}")
             if dataset_id != "unknown":
                 # Build the link from config + validated ID rather than echoing
                 # the portal-supplied permalink.
-                lines.append(f"   Portal: {self.plugin_config.portal_url}/d/{dataset_id}")
+                lines.append(
+                    f"   Portal: {self.plugin_config.portal_url}/d/{dataset_id}"
+                )
             lines.append("")
 
         return "\n".join(lines)
@@ -597,34 +641,81 @@ Use get_schema first for column names.""",
         description = self.portal_block(
             dataset.get("description"), default="No description"
         )
-        row_count = self.portal_line(dataset.get("rowCount"), default="N/A")
-        updated = self.portal_line(
-            dataset.get("rowsUpdatedAt", dataset.get("metadata_updated_at")),
-            default="N/A",
+        row_count = self.portal_line(dataset.get("rowCount"))
+        rows_updated = self.short_date(
+            dataset.get("rowsUpdatedAt", dataset.get("metadata_updated_at"))
         )
+        created = self.short_date(dataset.get("createdAt"))
+        published = self.short_date(dataset.get("publicationDate"))
+        view_modified = self.short_date(dataset.get("viewLastModified"))
         tags = dataset.get("tags", [])
         category = self.portal_line(dataset.get("category"))
-        license_info = dataset.get("license", {})
+        license_info = dataset.get("license") or {}
+        if isinstance(license_info, dict):
+            license_name = self.portal_line(license_info.get("name"))
+            license_link = self.display_portal_url(license_info.get("termsLink"))
+        else:
+            license_name = self.portal_line(license_info)
+            license_link = ""
+        license_id = self.portal_line(dataset.get("licenseId"), max_len=100)
+        attribution = self.portal_line(dataset.get("attribution"))
+        attribution_link = self.display_portal_url(dataset.get("attributionLink"))
+        columns = dataset.get("columns")
+        downloads = dataset.get("downloadCount")
+        views = dataset.get("viewCount")
+        provenance = self.portal_line(dataset.get("provenance"), max_len=40)
 
-        lines = [
-            f"Dataset: {name}",
-            f"ID: {dataset_id}",
-            f"Description: {description}",
-            f"Row count: {row_count}",
-            f"Last updated: {updated}",
-            "",
-        ]
-        if dataset_id != "unknown":
-            lines.append(f"Portal URL: {self.plugin_config.portal_url}/d/{dataset_id}")
-            lines.append("")
-
-        if tags:
-            tag_text = join_cleaned(tags) if isinstance(tags, list) else self.portal_line(tags)
-            lines.append(f"Tags: {tag_text}")
+        lines = [f"Dataset: {name}", f"ID: {dataset_id}"]
+        if attribution:
+            if attribution_link.startswith("("):
+                # Untrusted host renders as "(external: host)" already.
+                lines.append(f"Source: {attribution} {attribution_link}")
+            elif attribution_link:
+                lines.append(f"Source: {attribution} ({attribution_link})")
+            else:
+                lines.append(f"Source: {attribution}")
+        if license_name or license_id:
+            license_line = f"License: {license_name or license_id}"
+            if license_id and license_name:
+                license_line += f" ({license_id})"
+            if license_link:
+                license_line += f" — {license_link}"
+            lines.append(license_line)
+        dates = []
+        if created:
+            dates.append(f"Created: {created}")
+        if published:
+            dates.append(f"Published: {published}")
+        if view_modified:
+            dates.append(f"Metadata modified: {view_modified}")
+        if rows_updated:
+            dates.append(f"Rows updated: {rows_updated}")
+        if dates:
+            lines.append(" | ".join(dates))
+        facts = []
+        if row_count:
+            facts.append(f"Rows: {row_count}")
+        if isinstance(columns, list):
+            facts.append(f"Columns: {len(columns)}")
+        if isinstance(downloads, int):
+            facts.append(f"Downloads: {downloads}")
+        if isinstance(views, int):
+            facts.append(f"Views: {views}")
+        if provenance:
+            facts.append(f"Provenance: {provenance}")
+        if facts:
+            lines.append(" | ".join(facts))
         if category:
             lines.append(f"Category: {category}")
-        if license_info:
-            lines.append(f"License: {self.portal_line(license_info)}")
+        if tags:
+            tag_text = (
+                join_cleaned(tags) if isinstance(tags, list) else self.portal_line(tags)
+            )
+            lines.append(f"Tags: {tag_text}")
+        lines.append(f"Description: {description}")
+        if dataset_id != "unknown":
+            lines.append("")
+            lines.append(f"Portal URL: {self.plugin_config.portal_url}/d/{dataset_id}")
 
         return "\n".join(lines)
 
