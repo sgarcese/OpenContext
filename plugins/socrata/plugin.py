@@ -5,6 +5,7 @@ NYC, Seattle) using the Discovery API for catalog search and SODA3 for data acce
 """
 
 import logging
+import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
@@ -12,6 +13,7 @@ import httpx
 
 from core.base_plugin import BaseOpenDataPlugin, HTTP_RETRY, ToolHandler
 from core.interfaces import PluginType, ToolDefinition, ToolResult
+from core.portal_content import join_cleaned
 from plugins.socrata.config_schema import SocrataPluginConfig
 from plugins.socrata.soql_validator import SoQLValidator
 
@@ -31,6 +33,9 @@ class SocrataPlugin(BaseOpenDataPlugin):
     plugin_version = "1.0.0"
 
     config_class = SocrataPluginConfig
+    # Socrata dataset IDs are "four-by-four" identifiers (e.g. abcd-1234).
+    id_pattern = re.compile(r"^[a-z0-9]{4}-[a-z0-9]{4}$")
+    provider_label = "open data portal (Socrata)"
 
     def _get_domain(self) -> str:
         """Extract hostname from base_url for Discovery API domains parameter."""
@@ -268,10 +273,21 @@ Use get_schema first for column names.""",
         """
         return {
             "search_datasets": ToolHandler(
-                handler=self._tool_search_datasets, required_args=("query",)
+                handler=self._tool_search_datasets,
+                required_args=("query",),
+                guidance=(
+                    f"View all datasets at: {self.plugin_config.portal_url}\n"
+                    "Use the get_dataset tool with a dataset ID from the list "
+                    "to get more details."
+                ),
             ),
             "get_dataset": ToolHandler(
-                handler=self._tool_get_dataset, required_args=("dataset_id",)
+                handler=self._tool_get_dataset,
+                required_args=("dataset_id",),
+                guidance=(
+                    "Use the get_schema tool with this dataset's ID to get "
+                    "column info, then query_dataset to query data."
+                ),
             ),
             "get_schema": ToolHandler(
                 handler=self._tool_get_schema, required_args=("dataset_id",)
@@ -554,44 +570,40 @@ Use get_schema first for column names.""",
 
         for i, item in enumerate(datasets, 1):
             resource = item.get("resource", item)
-            name = resource.get("name", "Untitled")
-            dataset_id = resource.get("id", "unknown")
-            description = (
-                (resource.get("description") or "")[:100] + "..."
-                if resource.get("description")
-                else "No description"
+            name = self.portal_line(resource.get("name"), default="Untitled")
+            dataset_id = self.safe_id(resource.get("id"))
+            description = self.portal_line(
+                resource.get("description"), max_len=100, default="No description"
             )
-            category = resource.get("category", "")
-            permalink = resource.get("permalink", "")
-            if not permalink and dataset_id:
-                permalink = f"{self.plugin_config.portal_url}/d/{dataset_id}"
+            category = self.portal_line(resource.get("category"))
 
             lines.append(f"{i}. {name}")
             lines.append(f"   ID: {dataset_id}")
             lines.append(f"   Description: {description}")
             if category:
                 lines.append(f"   Category: {category}")
-            lines.append(f"   Portal: {permalink}")
+            if dataset_id != "unknown":
+                # Build the link from config + validated ID rather than echoing
+                # the portal-supplied permalink.
+                lines.append(f"   Portal: {self.plugin_config.portal_url}/d/{dataset_id}")
             lines.append("")
-
-        lines.append(
-            f"View all datasets at: {self.plugin_config.portal_url}\n"
-            f"Use get_dataset tool with dataset_id to get more details."
-        )
 
         return "\n".join(lines)
 
     def _format_dataset(self, dataset: Dict[str, Any]) -> str:
         """Format dataset metadata for user display."""
-        name = dataset.get("name", "Untitled")
-        dataset_id = dataset.get("id", dataset.get("viewId", "unknown"))
-        description = dataset.get("description", "No description")
-        row_count = dataset.get("rowCount", "N/A")
-        updated = dataset.get(
-            "rowsUpdatedAt", dataset.get("metadata_updated_at", "N/A")
+        name = self.portal_line(dataset.get("name"), default="Untitled")
+        dataset_id = self.safe_id(dataset.get("id", dataset.get("viewId")))
+        description = self.portal_block(
+            dataset.get("description"), default="No description"
+        )
+        row_count = self.portal_line(dataset.get("rowCount"), default="N/A")
+        updated = self.portal_line(
+            dataset.get("rowsUpdatedAt", dataset.get("metadata_updated_at")),
+            default="N/A",
         )
         tags = dataset.get("tags", [])
-        category = dataset.get("category", "")
+        category = self.portal_line(dataset.get("category"))
         license_info = dataset.get("license", {})
 
         lines = [
@@ -601,22 +613,18 @@ Use get_schema first for column names.""",
             f"Row count: {row_count}",
             f"Last updated: {updated}",
             "",
-            f"Portal URL: {self.plugin_config.portal_url}/d/{dataset_id}",
-            "",
         ]
+        if dataset_id != "unknown":
+            lines.append(f"Portal URL: {self.plugin_config.portal_url}/d/{dataset_id}")
+            lines.append("")
 
         if tags:
-            lines.append(f"Tags: {', '.join(tags) if isinstance(tags, list) else tags}")
+            tag_text = join_cleaned(tags) if isinstance(tags, list) else self.portal_line(tags)
+            lines.append(f"Tags: {tag_text}")
         if category:
             lines.append(f"Category: {category}")
         if license_info:
-            lines.append(f"License: {license_info}")
-
-        lines.append("")
-        lines.append(
-            f"Use get_schema with dataset_id='{dataset_id}' to get column info, "
-            f"then query_dataset to query data."
-        )
+            lines.append(f"License: {self.portal_line(license_info)}")
 
         return "\n".join(lines)
 
@@ -627,10 +635,14 @@ Use get_schema first for column names.""",
 
         lines = ["Schema fields (use these for SoQL queries):"]
         for col in columns:
-            field_name = col.get("fieldName", col.get("id", col.get("name", "unknown")))
-            display_name = col.get("name", col.get("displayName", ""))
-            data_type = col.get("dataTypeName", col.get("type", "unknown"))
-            description = col.get("description", "")
+            field_name = self.portal_line(
+                col.get("fieldName", col.get("id", col.get("name"))), default="unknown"
+            )
+            display_name = self.portal_line(col.get("name", col.get("displayName")))
+            data_type = self.portal_line(
+                col.get("dataTypeName", col.get("type")), default="unknown"
+            )
+            description = self.portal_line(col.get("description"))
 
             lines.append(f"  • {field_name} ({data_type})")
             if display_name and display_name != field_name:
@@ -671,7 +683,7 @@ Use get_schema first for column names.""",
         header_lines = [f"SQL Query Results: {len(records)} record(s)"]
         if fields:
             field_names = [field.get("id", "unknown") for field in fields]
-            header_lines.append(f"Fields: {', '.join(field_names)}")
+            header_lines.append(f"Fields: {join_cleaned(field_names)}")
 
         header = "\n".join(header_lines)
         return self.format_records(records, max_display=10, header=header)
@@ -685,10 +697,10 @@ Use get_schema first for column names.""",
 
         for i, cat in enumerate(categories, 1):
             if isinstance(cat, dict):
-                name = cat.get("name", cat.get("label", str(cat)))
-                count = cat.get("count", cat.get("value", ""))
+                name = self.portal_line(cat.get("name", cat.get("label", str(cat))))
+                count = self.portal_line(cat.get("count", cat.get("value", "")))
                 lines.append(f"  {i}. {name}: {count} dataset(s)")
             else:
-                lines.append(f"  {i}. {cat}")
+                lines.append(f"  {i}. {self.portal_line(cat)}")
 
         return "\n".join(lines)

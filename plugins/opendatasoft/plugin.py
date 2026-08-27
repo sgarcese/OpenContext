@@ -13,6 +13,7 @@ from typing import Any
 import httpx
 
 from core.base_plugin import BaseOpenDataPlugin, HTTP_RETRY, ToolHandler
+from core.portal_content import join_cleaned
 from core.interfaces import PluginType, ToolDefinition, ToolResult
 from plugins.opendatasoft.config_schema import OpendatasoftPluginConfig
 from plugins.opendatasoft.odsql_validator import ODSQLValidator
@@ -111,6 +112,9 @@ class OpendatasoftPlugin(BaseOpenDataPlugin):
     plugin_version = "1.0.0"
 
     config_class = OpendatasoftPluginConfig
+    # ODS dataset IDs are slugs, occasionally with '@' domain suffixes.
+    id_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.@-]{0,199}$")
+    provider_label = "open data portal (Opendatasoft)"
 
     async def initialize(self) -> bool:
         """Initialize the Opendatasoft plugin and test connectivity.
@@ -361,10 +365,21 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         """
         return {
             "search_datasets": ToolHandler(
-                handler=self._tool_search_datasets, required_args=("query",)
+                handler=self._tool_search_datasets,
+                required_args=("query",),
+                guidance=(
+                    f"View all datasets at: {self.plugin_config.portal_url}\n"
+                    "Use the get_dataset tool with a dataset ID from the list "
+                    "to get more details."
+                ),
             ),
             "get_dataset": ToolHandler(
-                handler=self._tool_get_dataset, required_args=("dataset_id",)
+                handler=self._tool_get_dataset,
+                required_args=("dataset_id",),
+                guidance=(
+                    "Use the get_schema tool with this dataset's ID to get field "
+                    "info, then query_data to query records."
+                ),
             ),
             "get_schema": ToolHandler(
                 handler=self._tool_get_schema, required_args=("dataset_id",)
@@ -753,11 +768,12 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
 
         for i, dataset in enumerate(datasets, 1):
             meta = self._dataset_meta(dataset)
-            dataset_id = dataset.get("dataset_id") or meta.get("dataset_id", "unknown")
-            title = meta.get("title") or dataset.get("title") or "Untitled"
-            raw_description = meta.get("description") or ""
-            description = (
-                raw_description[:100] + "..." if raw_description else "No description"
+            dataset_id = self.safe_id(dataset.get("dataset_id") or meta.get("dataset_id"))
+            title = self.portal_line(
+                meta.get("title") or dataset.get("title"), default="Untitled"
+            )
+            description = self.portal_line(
+                meta.get("description"), max_len=100, default="No description"
             )
             theme = meta.get("theme")
             records_count = meta.get("records_count")
@@ -766,33 +782,28 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
             lines.append(f"   ID: {dataset_id}")
             lines.append(f"   Description: {description}")
             if theme:
-                lines.append(
-                    f"   Theme: {', '.join(theme) if isinstance(theme, list) else theme}"
-                )
+                theme_text = join_cleaned(theme) if isinstance(theme, list) else self.portal_line(theme)
+                lines.append(f"   Theme: {theme_text}")
             if records_count is not None:
-                lines.append(f"   Records: {records_count}")
-            lines.append(
-                f"   Portal: {self.plugin_config.portal_url}/explore/dataset/{dataset_id}/"
-            )
+                lines.append(f"   Records: {self.portal_line(records_count)}")
+            if dataset_id != "unknown":
+                lines.append(
+                    f"   Portal: {self.plugin_config.portal_url}/explore/dataset/{dataset_id}/"
+                )
             lines.append("")
-
-        lines.append(
-            f"View all datasets at: {self.plugin_config.portal_url}\n"
-            f"Use get_dataset tool with a dataset ID to get more details."
-        )
 
         return "\n".join(lines)
 
     def _format_dataset(self, dataset: dict[str, Any]) -> str:
         """Format dataset metadata for user display."""
         meta = self._dataset_meta(dataset)
-        dataset_id = dataset.get("dataset_id") or meta.get("dataset_id", "unknown")
-        title = meta.get("title") or dataset.get("title") or "Untitled"
-        description = meta.get("description") or "No description"
+        dataset_id = self.safe_id(dataset.get("dataset_id") or meta.get("dataset_id"))
+        title = self.portal_line(meta.get("title") or dataset.get("title"), default="Untitled")
+        description = self.portal_block(meta.get("description"), default="No description")
         theme = meta.get("theme")
         keywords = meta.get("keyword")
-        records_count = meta.get("records_count", "N/A")
-        modified = meta.get("modified", "N/A")
+        records_count = self.portal_line(meta.get("records_count"), default="N/A")
+        modified = self.portal_line(meta.get("modified"), default="N/A")
 
         lines = [
             f"Dataset: {title}",
@@ -803,23 +814,17 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         ]
 
         if theme:
-            lines.append(
-                f"Theme: {', '.join(theme) if isinstance(theme, list) else theme}"
-            )
+            theme_text = join_cleaned(theme) if isinstance(theme, list) else self.portal_line(theme)
+            lines.append(f"Theme: {theme_text}")
         if keywords:
-            lines.append(
-                f"Keywords: {', '.join(keywords) if isinstance(keywords, list) else keywords}"
-            )
+            kw_text = join_cleaned(keywords) if isinstance(keywords, list) else self.portal_line(keywords)
+            lines.append(f"Keywords: {kw_text}")
 
-        lines.append("")
-        lines.append(
-            f"Portal URL: {self.plugin_config.portal_url}/explore/dataset/{dataset_id}/"
-        )
-        lines.append("")
-        lines.append(
-            f"Use get_schema with dataset_id='{dataset_id}' to get field info, "
-            f"then query_data to query records."
-        )
+        if dataset_id != "unknown":
+            lines.append("")
+            lines.append(
+                f"Portal URL: {self.plugin_config.portal_url}/explore/dataset/{dataset_id}/"
+            )
 
         return "\n".join(lines)
 
@@ -830,10 +835,10 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
 
         lines = ["Schema fields (use these for ODSQL queries):"]
         for field in fields:
-            name = field.get("name", "unknown")
-            field_type = field.get("type", "unknown")
-            label = field.get("label", "")
-            description = field.get("description", "")
+            name = self.portal_line(field.get("name"), default="unknown")
+            field_type = self.portal_line(field.get("type"), default="unknown")
+            label = self.portal_line(field.get("label"))
+            description = self.portal_line(field.get("description"))
 
             lines.append(f"  • {name} ({field_type})")
             if label and label != name:
@@ -872,7 +877,7 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
 
         header_lines = [f"Aggregation Results: {len(records)} row(s)"]
         if fields:
-            header_lines.append(f"Fields: {', '.join(fields)}")
+            header_lines.append(f"Fields: {join_cleaned(fields)}")
 
         return self.format_records(
             records, max_display=max_display, header="\n".join(header_lines)
@@ -888,10 +893,10 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
 
         for i, cat in enumerate(categories, 1):
             if isinstance(cat, dict):
-                name = cat.get("name", cat.get("label", str(cat)))
-                count = cat.get("count", cat.get("value", ""))
+                name = self.portal_line(cat.get("name", cat.get("label", str(cat))))
+                count = self.portal_line(cat.get("count", cat.get("value", "")))
                 lines.append(f"  {i}. {name}: {count} dataset(s)")
             else:
-                lines.append(f"  {i}. {cat}")
+                lines.append(f"  {i}. {self.portal_line(cat)}")
 
         return "\n".join(lines)

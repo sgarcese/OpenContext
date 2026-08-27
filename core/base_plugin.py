@@ -23,6 +23,14 @@ from tenacity import (
 
 from core.config_base import BasePluginConfig
 from core.interfaces import DataPlugin, ToolResult
+from core.portal_content import (
+    DEFAULT_MAX_LINE,
+    DEFAULT_MAX_TEXT,
+    clean_error_message,
+    clean_text,
+    frame_portal_content,
+    indent_continuation,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -47,14 +55,24 @@ class ToolHandler:
             successful ``ToolResult``).
         required_args: Argument names that must be present and truthy before
             the handler runs.
+        guidance: Optional next-step hint written by the connector (e.g.
+            "Use get_dataset with a dataset ID for details"). It is emitted
+            *outside* the untrusted-data boundary so connector instructions
+            are never mixed with portal text.
+        frame_output: Whether successful text output is wrapped in the
+            untrusted-data boundary by :meth:`BaseOpenDataPlugin.execute_tool`.
+            Leave True for anything that echoes portal content.
     """
 
-    __slots__ = ("handler", "required_args")
+    __slots__ = ("frame_output", "guidance", "handler", "required_args")
 
     def __init__(
         self,
         handler: Callable[[dict[str, Any]], Any],
         required_args: tuple[str, ...] = (),
+        *,
+        guidance: str | None = None,
+        frame_output: bool = True,
     ) -> None:
         """Initialize a ToolHandler.
 
@@ -62,9 +80,13 @@ class ToolHandler:
             handler: Async callable taking the arguments dict.
             required_args: Tuple of argument names that must be present and
                 truthy before the handler is invoked.
+            guidance: Connector-authored hint appended after the data boundary.
+            frame_output: Wrap successful text output in the data boundary.
         """
         self.handler = handler
         self.required_args = required_args
+        self.guidance = guidance
+        self.frame_output = frame_output
 
 
 class BaseOpenDataPlugin(DataPlugin):
@@ -78,6 +100,14 @@ class BaseOpenDataPlugin(DataPlugin):
     """
 
     config_class: type[BasePluginConfig] = BasePluginConfig
+
+    # Shape of a valid dataset/resource identifier for this provider. Used by
+    # :meth:`safe_id` before an ID is interpolated into a portal URL or a
+    # follow-up instruction, so a crafted ID cannot carry arbitrary text.
+    id_pattern: re.Pattern[str] = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,199}$")
+
+    # Human-readable label for the data boundary preamble.
+    provider_label: str = "open data portal"
 
     def __init__(self, config: dict[str, Any]) -> None:
         """Initialize the plugin and eagerly validate its configuration.
@@ -113,6 +143,69 @@ class BaseOpenDataPlugin(DataPlugin):
         self._initialized = False
         logger.info(f"{self.plugin_name} plugin shut down")
 
+    # ── Untrusted portal content helpers ───────────────────────────────
+
+    @property
+    def portal_source(self) -> str:
+        """Description of the portal used in the data-boundary preamble."""
+        return f"{self.plugin_config.city_name} {self.provider_label}"
+
+    def portal_text(
+        self,
+        value: Any,
+        *,
+        max_len: int = DEFAULT_MAX_TEXT,
+        default: str = "",
+    ) -> str:
+        """Clean a free-text portal value (description, notes, record value).
+
+        Multi-line content is preserved but normalized; see
+        :func:`core.portal_content.clean_text`.
+        """
+        cleaned = clean_text(value, max_len=max_len)
+        return cleaned if cleaned else default
+
+    def portal_block(
+        self,
+        value: Any,
+        *,
+        max_len: int = DEFAULT_MAX_TEXT,
+        default: str = "",
+    ) -> str:
+        """Clean a multi-line value for a ``Label: value`` line.
+
+        Like :meth:`portal_text`, but every continuation line is indented so
+        the value cannot forge a top-level label or connector instruction.
+        """
+        return indent_continuation(
+            self.portal_text(value, max_len=max_len, default=default)
+        )
+
+    def portal_line(
+        self,
+        value: Any,
+        *,
+        max_len: int = DEFAULT_MAX_LINE,
+        default: str = "",
+    ) -> str:
+        """Clean a portal value that must stay on one line (title, tag, name)."""
+        cleaned = clean_text(value, max_len=max_len, single_line=True)
+        return cleaned if cleaned else default
+
+    def safe_id(self, value: Any, *, default: str = "unknown") -> str:
+        """Return ``value`` if it looks like a valid identifier, else ``default``.
+
+        Use before building ``Portal: {portal_url}/dataset/{id}`` links or
+        ``Use get_schema with dataset_id='{id}'`` hints so that an ID coming
+        from the portal cannot smuggle path segments, query strings, or prose
+        into a URL or an instruction.
+        """
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = str(value)
+        if isinstance(value, str) and self.id_pattern.match(value):
+            return value
+        return default
+
     def _raise_http_error(self, exc: httpx.HTTPStatusError, context: str = "") -> None:
         """Translate an :class:`httpx.HTTPStatusError` into a RuntimeError.
 
@@ -146,9 +239,14 @@ class BaseOpenDataPlugin(DataPlugin):
         if not msg:
             msg = exc.response.text or f"HTTP {status_code}"
 
+        # The message body is portal-controlled; cap and normalize it and
+        # label it so the model does not mistake it for connector output.
+        msg = clean_error_message(msg)
         portal = f"{self.plugin_config.city_name} OpenData portal"
         prefix = f"Error{context} on" if context else "Error on"
-        raise RuntimeError(f"{prefix} {portal}: {msg} (HTTP {status_code})") from exc
+        raise RuntimeError(
+            f"{prefix} {portal} (HTTP {status_code}); portal said: {msg!r}"
+        ) from exc
 
     def tool_handlers(self) -> dict[str, ToolHandler]:
         """Return the mapping of tool name to :class:`ToolHandler`.
@@ -194,24 +292,53 @@ class BaseOpenDataPlugin(DataPlugin):
 
         try:
             result = await handler.handler(arguments)
-            if isinstance(result, ToolResult):
-                return result
-            if isinstance(result, str):
-                return ToolResult(
-                    content=[{"type": "text", "text": result}],
+            if not isinstance(result, ToolResult):
+                text = result if isinstance(result, str) else str(result)
+                result = ToolResult(
+                    content=[{"type": "text", "text": text}],
                     success=True,
                 )
-            return ToolResult(
-                content=[{"type": "text", "text": str(result)}],
-                success=True,
-            )
+            return self._finalize_result(result, handler, tool_name)
         except Exception as e:
             logger.error(f"Error executing tool {tool_name}: {e}", exc_info=True)
             return ToolResult(
                 content=[],
                 success=False,
-                error_message=str(e) if str(e) else "Tool execution failed",
+                error_message=clean_error_message(str(e)) or "Tool execution failed",
             )
+
+    def _finalize_result(
+        self, result: ToolResult, handler: ToolHandler, tool_name: str
+    ) -> ToolResult:
+        """Apply the untrusted-data boundary to a handler's ``ToolResult``.
+
+        Every ``text`` content item of a successful result is wrapped by
+        :func:`core.portal_content.frame_portal_content`; the handler's
+        ``guidance`` is placed after the closing marker of the last item.
+        Error messages are normalized and capped.
+        """
+        if not result.success:
+            if result.error_message:
+                result.error_message = clean_error_message(result.error_message)
+            return result
+        if not handler.frame_output:
+            return result
+
+        text_indexes = [
+            i
+            for i, item in enumerate(result.content)
+            if isinstance(item, dict) and item.get("type") == "text"
+        ]
+        for pos, i in enumerate(text_indexes):
+            item = dict(result.content[i])
+            item["text"] = frame_portal_content(
+                item.get("text", ""),
+                source=self.portal_source,
+                guidance=handler.guidance if pos == len(text_indexes) - 1 else None,
+                tool_name=tool_name,
+            )
+            result.content[i] = item
+        return result
 
     def format_records(
         self,
@@ -249,7 +376,12 @@ class BaseOpenDataPlugin(DataPlugin):
             for key, value in record.items():
                 if key in skip_keys:
                     continue
-                lines.append(f"  {key}: {value}")
+                # Keys stay on one line; values keep their newlines but every
+                # continuation line is indented so a value cannot forge a
+                # top-level "Record N:" header or a connector instruction.
+                safe_key = self.portal_line(key, default="(empty)")
+                safe_value = indent_continuation(self.portal_text(value))
+                lines.append(f"  {safe_key}: {safe_value}")
             lines.append("")
 
         if len(records) > max_display:

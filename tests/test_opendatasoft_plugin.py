@@ -342,8 +342,8 @@ class TestSearchDatasets:
         assert "Theme: Public Safety" in text
         assert "Records: 4321" in text
         assert "https://data.longbeach.gov/explore/dataset/police-calls/" in text
-        assert "..." in text  # description truncated
-        assert "Use get_dataset tool" in text
+        assert "…[truncated" in text  # description truncated
+        assert "Use the get_dataset tool" in text
 
     @pytest.mark.asyncio
     async def test_search_datasets_empty_results_message(self):
@@ -425,7 +425,7 @@ class TestGetDatasetAndSchema:
             "Portal URL: https://data.longbeach.gov/explore/dataset/police-calls/"
             in text
         )
-        assert "Use get_schema" in text
+        assert "Use the get_schema" in text
 
     @pytest.mark.asyncio
     async def test_get_schema_tool_formats_fields(self):
@@ -449,7 +449,7 @@ class TestGetDatasetAndSchema:
         """Test the empty-schema message."""
         plugin, _ = _initialized_plugin(get_return={"dataset_id": "x", "fields": []})
         result = await plugin.execute_tool("get_schema", {"dataset_id": "x"})
-        assert result.content[0]["text"] == "No schema information available."
+        assert "No schema information available." in result.content[0]["text"]
 
     @pytest.mark.asyncio
     async def test_http_404_produces_descriptive_error(self):
@@ -550,7 +550,7 @@ class TestQueryData:
         """Test the empty-records message."""
         plugin, _ = _initialized_plugin(get_return={"total_count": 0, "results": []})
         result = await plugin.execute_tool("query_data", {"dataset_id": "d"})
-        assert result.content[0]["text"] == "No records found matching the query."
+        assert "No records found matching the query." in result.content[0]["text"]
 
     @pytest.mark.asyncio
     async def test_query_data_rejects_malicious_where(self):
@@ -750,9 +750,7 @@ class TestAggregateData:
         result = await plugin.execute_tool(
             "aggregate_data", {"dataset_id": "d", "metrics": {"total": "count(*)"}}
         )
-        assert result.content[0]["text"] == (
-            "No records found matching the aggregation."
-        )
+        assert "No records found matching the aggregation." in result.content[0]["text"]
 
 
 class TestAggregateDataSecurity:
@@ -871,9 +869,7 @@ class TestListCategories:
         """Test the empty-categories message."""
         plugin, _ = _initialized_plugin(get_return={"facets": []})
         result = await plugin.execute_tool("list_categories", {})
-        assert result.content[0]["text"] == (
-            "No categories found on Long Beach's open data portal."
-        )
+        assert "No categories found on Long Beach's open data portal." in result.content[0]["text"]
 
 
 class TestHealthCheck:

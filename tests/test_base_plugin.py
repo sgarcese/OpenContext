@@ -10,6 +10,14 @@ from pydantic import field_validator
 from core.base_plugin import BaseOpenDataPlugin, ToolHandler
 from core.config_base import BasePluginConfig
 from core.interfaces import ToolResult
+from core.portal_content import PORTAL_DATA_END, PORTAL_DATA_START
+
+
+def _body(text: str) -> str:
+    """Return the portal-data body between the untrusted-data markers."""
+    start = text.index(PORTAL_DATA_START) + len(PORTAL_DATA_START)
+    end = text.index(PORTAL_DATA_END)
+    return text[start:end].strip("\n")
 
 
 class _FakeConfig(BasePluginConfig):
@@ -174,14 +182,14 @@ class TestToolDispatch:
     async def test_tool_result_returned_as_is(self, plugin):
         result = await plugin.execute_tool("echo", {"message": "hello"})
         assert result.success is True
-        assert result.content[0]["text"] == "hello"
+        assert _body(result.content[0]["text"]) == "hello"
 
     @pytest.mark.asyncio
     async def test_str_return_wrapped(self, plugin):
         result = await plugin.execute_tool("returns_str", {})
         assert result.success is True
         assert result.content[0]["type"] == "text"
-        assert result.content[0]["text"] == "plain-string-output"
+        assert _body(result.content[0]["text"]) == "plain-string-output"
 
     @pytest.mark.asyncio
     async def test_exception_wrapped(self, plugin):
@@ -211,7 +219,7 @@ class TestToolDispatch:
     async def test_no_args_handler(self, plugin):
         result = await plugin.execute_tool("no_args", {})
         assert result.success is True
-        assert result.content[0]["text"] == "no-args-ok"
+        assert _body(result.content[0]["text"]) == "no-args-ok"
 
 
 class TestRaiseHttpError:
