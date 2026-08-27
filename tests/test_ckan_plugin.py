@@ -4,10 +4,11 @@ These tests verify plugin initialization, tool execution, API interactions,
 error handling, and data formatting. Tests are designed to fail if functionality breaks.
 """
 
-import pytest
+from typing import ClassVar
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
+import pytest
 
 from plugins.ckan.plugin import CKANPlugin
 
@@ -1086,7 +1087,7 @@ class TestAggregateDataUsability:
 
 # ── Catalog metadata enrichment, browse and facet tools ─────────────────────
 
-from plugins.ckan.plugin import (  # noqa: E402
+from plugins.ckan.plugin import (
     _SORT_OPTIONS,
     _build_fq,
     _escape_solr_phrase,
@@ -1396,7 +1397,7 @@ class TestGetCatalogStats:
         "portal_url": "https://data.example.com",
         "city_name": "TestCity",
     }
-    FACETS = {
+    FACETS: ClassVar[dict] = {
         "count": 235,
         "search_facets": {
             "organization": {

@@ -11,7 +11,7 @@ the remaining ``DataPlugin`` abstract methods.
 import logging
 import re
 from collections.abc import Callable, Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -214,9 +214,7 @@ class BaseOpenDataPlugin(DataPlugin):
         if isinstance(value, (int, float)):
             try:
                 seconds = value / 1000 if value > 1e11 else value
-                return datetime.fromtimestamp(seconds, tz=timezone.utc).strftime(
-                    "%Y-%m-%d"
-                )
+                return datetime.fromtimestamp(seconds, tz=UTC).strftime("%Y-%m-%d")
             except (ValueError, OverflowError, OSError):
                 return ""
         text = clean_text(value, max_len=40, single_line=True)
