@@ -67,9 +67,7 @@ class TestInitialization:
 
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
-            mock_client.get = AsyncMock(
-                return_value=_mock_response({"features": []})
-            )
+            mock_client.get = AsyncMock(return_value=_mock_response({"features": []}))
             mock_client_class.return_value = mock_client
 
             result = await plugin.initialize()
@@ -85,9 +83,7 @@ class TestInitialization:
 
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
-            mock_client.get = AsyncMock(
-                return_value=_mock_response({"features": []})
-            )
+            mock_client.get = AsyncMock(return_value=_mock_response({"features": []}))
             mock_client_class.return_value = mock_client
 
             await plugin.initialize()
@@ -119,9 +115,7 @@ class TestInitialization:
 
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
-            mock_client.get = AsyncMock(
-                return_value=_mock_response({"features": []})
-            )
+            mock_client.get = AsyncMock(return_value=_mock_response({"features": []}))
             mock_client_class.return_value = mock_client
 
             await plugin.initialize()
@@ -129,7 +123,9 @@ class TestInitialization:
             # Both clients should carry the Authorization header.
             for call in mock_client_class.call_args_list:
                 call_kwargs = call[1]
-                assert call_kwargs["headers"]["Authorization"] == "Bearer test-token-123"
+                assert (
+                    call_kwargs["headers"]["Authorization"] == "Bearer test-token-123"
+                )
 
     @pytest.mark.asyncio
     async def test_shutdown_closes_tracked_clients(self, arcgis_config):
@@ -137,9 +133,7 @@ class TestInitialization:
 
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
-            mock_client.get = AsyncMock(
-                return_value=_mock_response({"features": []})
-            )
+            mock_client.get = AsyncMock(return_value=_mock_response({"features": []}))
             mock_client_class.return_value = mock_client
 
             await plugin.initialize()
@@ -207,26 +201,32 @@ class TestExecuteTool:
 
         with patch.object(
             plugin,
-            "search_datasets",
+            "_search_hub",
             new_callable=AsyncMock,
-            return_value=[
-                {
-                    "id": "abc123",
-                    "title": "Test Dataset",
-                    "tags": [],
-                    "description": "desc",
-                }
-            ],
+            return_value={
+                "results": [
+                    {
+                        "id": "abc123",
+                        "title": "Test Dataset",
+                        "tags": [],
+                        "description": "desc",
+                    }
+                ],
+                "total": 7,
+            },
         ) as mock_search:
             result = await plugin.execute_tool("search_datasets", {"query": "test"})
 
         assert result.success is True
         assert len(result.content) > 0
         assert "text" in result.content[0]
+        assert "Found 7 matching dataset(s)" in result.content[0]["text"]
         mock_search.assert_called_once_with("test", 10)
 
     @pytest.mark.asyncio
-    async def test_execute_tool_search_datasets_rejects_old_q_param(self, arcgis_config):
+    async def test_execute_tool_search_datasets_rejects_old_q_param(
+        self, arcgis_config
+    ):
         plugin = ArcGISPlugin(arcgis_config)
 
         with patch.object(
@@ -402,9 +402,7 @@ class TestHubApiMethods:
     async def test_search_datasets_empty(self, arcgis_config):
         plugin = ArcGISPlugin(arcgis_config)
         plugin.hub_client = AsyncMock()
-        plugin.hub_client.get = AsyncMock(
-            return_value=_mock_response({"features": []})
-        )
+        plugin.hub_client.get = AsyncMock(return_value=_mock_response({"features": []}))
 
         results = await plugin.search_datasets("nothing", 10)
         assert results == []
@@ -427,7 +425,9 @@ class TestHubApiMethods:
         )
 
         dataset = await plugin.get_dataset("abc123")
-        assert dataset["service_url"] == "https://services.arcgis.com/xyz/FeatureServer/0"
+        assert (
+            dataset["service_url"] == "https://services.arcgis.com/xyz/FeatureServer/0"
+        )
         assert dataset["snippet"] == ""
 
 
@@ -502,12 +502,17 @@ class TestGetSchema:
     async def test_get_schema_no_service_url_raises(self, arcgis_config):
         plugin = ArcGISPlugin(arcgis_config)
 
-        with patch.object(
-            plugin,
-            "get_dataset",
-            new_callable=AsyncMock,
-            return_value={"id": "abc123", "service_url": ""},
-        ), pytest.raises(ValueError, match="does not have a queryable Feature Service URL"):
+        with (
+            patch.object(
+                plugin,
+                "get_dataset",
+                new_callable=AsyncMock,
+                return_value={"id": "abc123", "service_url": ""},
+            ),
+            pytest.raises(
+                ValueError, match="does not have a queryable Feature Service URL"
+            ),
+        ):
             await plugin.get_schema("abc123")
 
     @pytest.mark.asyncio
@@ -515,15 +520,18 @@ class TestGetSchema:
         """SSRF guard rejects a Feature Service URL on an untrusted host."""
         plugin = ArcGISPlugin(arcgis_config)
 
-        with patch.object(
-            plugin,
-            "get_dataset",
-            new_callable=AsyncMock,
-            return_value={
-                "id": "abc123",
-                "service_url": "https://evil.example.com/FeatureServer/0",
-            },
-        ), pytest.raises(ValueError, match="not trusted"):
+        with (
+            patch.object(
+                plugin,
+                "get_dataset",
+                new_callable=AsyncMock,
+                return_value={
+                    "id": "abc123",
+                    "service_url": "https://evil.example.com/FeatureServer/0",
+                },
+            ),
+            pytest.raises(ValueError, match="not trusted"),
+        ):
             await plugin.get_schema("abc123")
 
 
@@ -666,12 +674,21 @@ class TestQueryFeaturesTwoHop:
     async def test_query_features_no_service_url_raises(self, arcgis_config):
         plugin = ArcGISPlugin(arcgis_config)
 
-        with patch.object(
-            plugin,
-            "get_dataset",
-            new_callable=AsyncMock,
-            return_value={"id": "abc123", "type": "Feature Layer", "service_url": ""},
-        ), pytest.raises(ValueError, match="does not have a queryable Feature Service URL"):
+        with (
+            patch.object(
+                plugin,
+                "get_dataset",
+                new_callable=AsyncMock,
+                return_value={
+                    "id": "abc123",
+                    "type": "Feature Layer",
+                    "service_url": "",
+                },
+            ),
+            pytest.raises(
+                ValueError, match="does not have a queryable Feature Service URL"
+            ),
+        ):
             await plugin._query_features("abc123", "1=1", "*", 100)
 
     @pytest.mark.asyncio
@@ -679,32 +696,38 @@ class TestQueryFeaturesTwoHop:
         """SSRF guard rejects a Feature Service URL on an untrusted host."""
         plugin = ArcGISPlugin(arcgis_config)
 
-        with patch.object(
-            plugin,
-            "get_dataset",
-            new_callable=AsyncMock,
-            return_value={
-                "id": "abc123",
-                "type": "Feature Layer",
-                "service_url": "http://169.254.169.254/FeatureServer/0",
-            },
-        ), pytest.raises(ValueError, match="not trusted"):
+        with (
+            patch.object(
+                plugin,
+                "get_dataset",
+                new_callable=AsyncMock,
+                return_value={
+                    "id": "abc123",
+                    "type": "Feature Layer",
+                    "service_url": "http://169.254.169.254/FeatureServer/0",
+                },
+            ),
+            pytest.raises(ValueError, match="not trusted"),
+        ):
             await plugin._query_features("abc123", "1=1", "*", 100)
 
     @pytest.mark.asyncio
     async def test_query_features_non_queryable_type_raises(self, arcgis_config):
         plugin = ArcGISPlugin(arcgis_config)
 
-        with patch.object(
-            plugin,
-            "get_dataset",
-            new_callable=AsyncMock,
-            return_value={
-                "id": "abc123",
-                "type": "Image Service",
-                "service_url": "https://services.arcgis.com/xyz/FeatureServer/0",
-            },
-        ), pytest.raises(ValueError, match="not queryable"):
+        with (
+            patch.object(
+                plugin,
+                "get_dataset",
+                new_callable=AsyncMock,
+                return_value={
+                    "id": "abc123",
+                    "type": "Image Service",
+                    "service_url": "https://services.arcgis.com/xyz/FeatureServer/0",
+                },
+            ),
+            pytest.raises(ValueError, match="not queryable"),
+        ):
             await plugin._query_features("abc123", "1=1", "*", 100)
 
     @pytest.mark.asyncio
@@ -750,16 +773,19 @@ class TestQueryFeaturesTwoHop:
         )
         plugin.feature_client = mock_feature_client
 
-        with patch.object(
-            plugin,
-            "get_dataset",
-            new_callable=AsyncMock,
-            return_value={
-                "id": "abc123",
-                "type": "Feature Layer",
-                "service_url": "https://services.arcgis.com/xyz/FeatureServer/0",
-            },
-        ), pytest.raises(RuntimeError, match="Feature Service query failed"):
+        with (
+            patch.object(
+                plugin,
+                "get_dataset",
+                new_callable=AsyncMock,
+                return_value={
+                    "id": "abc123",
+                    "type": "Feature Layer",
+                    "service_url": "https://services.arcgis.com/xyz/FeatureServer/0",
+                },
+            ),
+            pytest.raises(RuntimeError, match="Feature Service query failed"),
+        ):
             await plugin._query_features("abc123", "1=1", "*", 100)
 
 
@@ -856,15 +882,11 @@ class TestValidateFeatureUrl:
 
     def test_rejects_file_scheme(self):
         with pytest.raises(ValueError, match="http or https"):
-            ArcGISPlugin._validate_feature_url(
-                "file:///etc/passwd", self.PORTAL
-            )
+            ArcGISPlugin._validate_feature_url("file:///etc/passwd", self.PORTAL)
 
     def test_rejects_missing_hostname(self):
         with pytest.raises(ValueError, match="hostname"):
-            ArcGISPlugin._validate_feature_url(
-                "https:///FeatureServer/0", self.PORTAL
-            )
+            ArcGISPlugin._validate_feature_url("https:///FeatureServer/0", self.PORTAL)
 
     def test_rejects_lookalike_arcgis_host(self):
         """A host containing 'arcgis.com' but not ending with it is rejected."""
@@ -965,9 +987,7 @@ class TestHealthCheck:
     async def test_health_check_succeeds(self, arcgis_config):
         plugin = ArcGISPlugin(arcgis_config)
         plugin.hub_client = AsyncMock()
-        plugin.hub_client.get = AsyncMock(
-            return_value=_mock_response({"features": []})
-        )
+        plugin.hub_client.get = AsyncMock(return_value=_mock_response({"features": []}))
 
         health = await plugin.health_check()
         assert health is True
@@ -1058,12 +1078,11 @@ class TestAggregations:
         """get_aggregations returns [] on HTTP errors (best-effort helper)."""
         plugin = ArcGISPlugin(arcgis_config)
         plugin.hub_client = AsyncMock()
-        plugin.hub_client.get = AsyncMock(
-            side_effect=RuntimeError("HTTP error")
-        )
+        plugin.hub_client.get = AsyncMock(side_effect=RuntimeError("HTTP error"))
 
         buckets = await plugin.get_aggregations("type")
         assert buckets == []
+
 
 class TestCodeReviewFixes:
     """Regressions found in code review of the migration + SSRF commits."""
@@ -1145,3 +1164,73 @@ class TestCodeReviewFixes:
         assert "Record 10:" in text
         assert "Record 11:" not in text
         assert "... and 40 more record(s)" in text
+
+
+class TestMetadataEnrichment:
+    @pytest.fixture
+    def plugin(self, arcgis_config):
+        return ArcGISPlugin(arcgis_config)
+
+    def test_format_dataset_surfaces_dates_size_org(self, plugin):
+        dataset = {
+            "id": "abc123",
+            "title": "Parcels",
+            "type": "Feature Service",
+            "access": "public",
+            "owner": "gis_admin",
+            "orgName": "City GIS",
+            "created": "2020-01-01",
+            "modified": "2026-02-02",
+            "lastEditDate": "2026-02-03",
+            "numRecords": 1200,
+            "size": 1048576,
+            "licenseInfo": "CC BY 4.0",
+            "description": "Parcel polygons",
+            "tags": ["parcels"],
+            "categories": ["/Categories/Planning"],
+            "typeKeywords": ["ArcGIS Server", "Feature Service"],
+            "url": "https://services.arcgis.com/x/FeatureServer/0",
+            "service_url": "https://evil.example.org/FeatureServer/0",
+        }
+        out = plugin._format_dataset(dataset)
+        assert "Owner: gis_admin (City GIS)" in out
+        assert (
+            "Created: 2020-01-01 | Modified: 2026-02-02 | Last edit: 2026-02-03" in out
+        )
+        assert "Records: 1200 | Size: 1.0 MB" in out
+        assert "License: CC BY 4.0" in out
+        assert "Categories: /Categories/Planning" in out
+        assert "Type keywords: ArcGIS Server, Feature Service" in out
+        assert "URL: https://services.arcgis.com/x/FeatureServer/0" in out
+        assert "Service URL: (external: evil.example.org)" in out
+        assert "Extent" not in out
+        assert "Snippet" not in out
+
+    def test_search_results_header_and_facts(self, plugin):
+        hits = [
+            {
+                "id": "abc123",
+                "title": "Parcels",
+                "owner": "gis_admin",
+                "created": "2020-01-01",
+                "modified": "2026-02-02",
+                "recordCount": 5,
+                "tags": [],
+            }
+        ]
+        out = plugin._format_search_results(hits, total=300)
+        assert out.startswith(
+            "Found 300 matching dataset(s) in TestCity's open data portal (showing 1-1):"
+        )
+        assert (
+            "Owner: gis_admin | Created: 2020-01-01 | Modified: 2026-02-02 | Records: 5"
+            in out
+        )
+
+    def test_summary_dates_from_epoch_ms(self):
+        summary = ArcGISPlugin._extract_dataset_summary(
+            {"id": "x", "created": 1577836800000, "modified": None, "recordCount": 3}
+        )
+        assert summary["created"] == "2020-01-01"
+        assert summary["modified"] == ""
+        assert summary["recordCount"] == 3
