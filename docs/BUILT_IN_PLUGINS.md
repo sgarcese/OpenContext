@@ -88,8 +88,8 @@ plugins:
 
 ### Tools
 
-- `socrata__search_datasets(query, limit)` - Search for datasets in the portal catalog
-- `socrata__get_dataset(dataset_id)` - Get full metadata for a dataset (4x4 ID)
+- `socrata__search_datasets(query, limit)` - Search for datasets in the portal catalog; header reports the catalog-wide match count
+- `socrata__get_dataset(dataset_id)` - Full metadata for a dataset (4x4 ID): source/attribution, license, created/published/modified dates, row and column counts, downloads/views, category, tags
 - `socrata__get_schema(dataset_id)` - Get column schema for constructing SoQL queries
 - `socrata__query_dataset(dataset_id, soql_query)` - Query data using SoQL
 - `socrata__execute_sql(dataset_id, soql)` - Execute raw SoQL query (advanced, similar to CKAN execute_sql)
@@ -151,7 +151,7 @@ plugins:
 ### Tools
 
 - `arcgis__search_datasets(query, limit)` - Search the Hub catalog (query required)
-- `arcgis__get_dataset(dataset_id)` - Get Hub item metadata
+- `arcgis__get_dataset(dataset_id)` - Hub item metadata: owner/organization, created/modified/last-edit dates, record count, size, license, categories, type keywords, item and service URLs (host-gated)
 - `arcgis__get_aggregations(field, query)` - Aggregate counts for a field
 - `arcgis__get_schema(dataset_id)` - Get Feature Service layer schema
 - `arcgis__query_data(dataset_id, where, out_fields, limit)` - Query records (limit max 1000)
@@ -186,7 +186,7 @@ plugins:
 ### Tools
 
 - `opendatasoft__search_datasets(query, limit)` - Search the portal catalog (full-text via ODSQL `search()`)
-- `opendatasoft__get_dataset(dataset_id)` - Get dataset metadata (title, description, theme, keywords, record count)
+- `opendatasoft__get_dataset(dataset_id)` - Dataset metadata: publisher, license, attribution, modified/data-processed dates, record and field counts, theme, keywords, references
 - `opendatasoft__get_schema(dataset_id)` - Get field names, types and descriptions for ODSQL clauses
 - `opendatasoft__query_data(dataset_id, where, select, order_by, limit)` - Query records with ODSQL (limit capped at 100)
 - `opendatasoft__aggregate_data(dataset_id, metrics, group_by, where, order_by, limit)` - Aggregate records with GROUP BY
