@@ -129,7 +129,6 @@ def _clamp(value: Any, default: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, n))
 
 
-def _validate_identifier(name: str) -> None:
 def _validate_identifier(name: str) -> str:
     """Validate that ``name`` is a safe SQL identifier.
 
@@ -138,9 +137,6 @@ def _validate_identifier(name: str) -> str:
 
     Raises:
         ValueError: If ``name`` is not a safe identifier.
-
-    Returns:
-        The validated identifier.
     """
     if not isinstance(name, str) or not _SAFE_IDENTIFIER.match(name):
         raise ValueError(f"Invalid identifier: {name!r}")

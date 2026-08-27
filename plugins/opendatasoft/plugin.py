@@ -403,9 +403,18 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
     async def _tool_search_datasets(self, arguments: dict[str, Any]) -> ToolResult:
         query = arguments.get("query", "")
         limit = arguments.get("limit", 10)
-        datasets = await self.search_datasets(query, limit)
+        result = await self._catalog_search(query, limit)
+        datasets = result.get("results", []) or []
+        total = result.get("total_count")
         return ToolResult(
-            content=[{"type": "text", "text": self._format_search_results(datasets)}],
+            content=[
+                {
+                    "type": "text",
+                    "text": self._format_search_results(
+                        datasets, total=total if isinstance(total, int) else None
+                    ),
+                }
+            ],
             success=True,
         )
 
@@ -493,12 +502,24 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         """
         # ODSQL string literals are double quoted; escape any embedded quotes
         # (and backslashes) so the search term cannot break out of the literal.
+        result = await self._catalog_search(query, limit)
+        return result.get("results", []) or []
+
+    async def _catalog_search(self, query: str, limit: int) -> dict[str, Any]:
+        """Search the catalog and return the full envelope (``total_count`` + ``results``)."""
+        # ODSQL string literals are double quoted; escape any embedded quotes
+        # (and backslashes) so the search term cannot break out of the literal.
         escaped = query.replace("\\", "\\\\").replace('"', '\\"')
-        response = await self._call_api(
-            "/catalog/datasets",
-            {"where": f'search("{escaped}")', "limit": _clamp_limit(limit, default=10)},
+        return (
+            await self._call_api(
+                "/catalog/datasets",
+                {
+                    "where": f'search("{escaped}")',
+                    "limit": _clamp_limit(limit, default=10),
+                },
+            )
+            or {}
         )
-        return response.get("results", [])
 
     async def get_dataset(self, dataset_id: str) -> dict[str, Any]:
         """Get full metadata for a specific dataset.
@@ -764,13 +785,20 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         default = metas.get("default") if isinstance(metas, dict) else None
         return default if isinstance(default, dict) else {}
 
-    def _format_search_results(self, datasets: list[dict[str, Any]]) -> str:
-        """Format catalog search results for user display."""
+    def _format_search_results(
+        self, datasets: list[dict[str, Any]], *, total: int | None = None
+    ) -> str:
+        """Format catalog search results for user display.
+
+        Args:
+            datasets: Catalog hits.
+            total: Catalog-wide hit count (``total_count``), if known.
+        """
         city = self.plugin_config.city_name
         if not datasets:
             return f"No datasets found in {city}'s open data portal."
 
-        lines = [f"Found {len(datasets)} dataset(s) in {city}'s open data portal:\n"]
+        lines = [self.format_search_header(total, len(datasets)), ""]
 
         for i, dataset in enumerate(datasets, 1):
             meta = self._dataset_meta(dataset)
@@ -785,9 +813,20 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
             )
             theme = meta.get("theme")
             records_count = meta.get("records_count")
+            modified = self.short_date(meta.get("modified"))
+            publisher = self.portal_line(meta.get("publisher"))
 
             lines.append(f"{i}. {title}")
             lines.append(f"   ID: {dataset_id}")
+            facts = []
+            if publisher:
+                facts.append(f"Publisher: {publisher}")
+            if modified:
+                facts.append(f"Modified: {modified}")
+            if records_count is not None:
+                facts.append(f"Records: {self.portal_line(records_count)}")
+            if facts:
+                lines.append("   " + " | ".join(facts))
             lines.append(f"   Description: {description}")
             if theme:
                 theme_text = (
@@ -796,8 +835,6 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
                     else self.portal_line(theme)
                 )
                 lines.append(f"   Theme: {theme_text}")
-            if records_count is not None:
-                lines.append(f"   Records: {self.portal_line(records_count)}")
             if dataset_id != "unknown":
                 lines.append(
                     f"   Portal: {self.plugin_config.portal_url}/explore/dataset/{dataset_id}/"
@@ -819,15 +856,45 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         theme = meta.get("theme")
         keywords = meta.get("keyword")
         records_count = self.portal_line(meta.get("records_count"), default="N/A")
-        modified = self.portal_line(meta.get("modified"), default="N/A")
+        modified = self.short_date(meta.get("modified")) or "N/A"
+        data_processed = self.short_date(meta.get("data_processed"))
+        metadata_processed = self.short_date(meta.get("metadata_processed"))
+        publisher = self.portal_line(meta.get("publisher"))
+        license_name = self.portal_line(meta.get("license"))
+        license_url = self.display_portal_url(meta.get("license_url"))
+        attributions = meta.get("attributions")
+        references = self.display_portal_url(meta.get("references"))
+        fields = dataset.get("fields")
 
-        lines = [
-            f"Dataset: {title}",
-            f"ID: {dataset_id}",
-            f"Description: {description}",
-            f"Records: {records_count}",
-            f"Last modified: {modified}",
-        ]
+        lines = [f"Dataset: {title}", f"ID: {dataset_id}"]
+        if publisher:
+            lines.append(f"Publisher: {publisher}")
+        if license_name or license_url:
+            lines.append(
+                f"License: {license_name or license_url}"
+                + (f" — {license_url}" if license_url and license_name else "")
+            )
+        if attributions:
+            attr_text = (
+                join_cleaned(attributions)
+                if isinstance(attributions, list)
+                else self.portal_line(attributions)
+            )
+            if attr_text:
+                lines.append(f"Attribution: {attr_text}")
+        dates = [f"Last modified: {modified}"]
+        if data_processed:
+            dates.append(f"Data processed: {data_processed}")
+        if metadata_processed:
+            dates.append(f"Metadata processed: {metadata_processed}")
+        lines.append(" | ".join(dates))
+        facts = [f"Records: {records_count}"]
+        if isinstance(fields, list):
+            facts.append(f"Fields: {len(fields)}")
+        lines.append(" | ".join(facts))
+        if references:
+            lines.append(f"References: {references}")
+        lines.append(f"Description: {description}")
 
         if theme:
             theme_text = (

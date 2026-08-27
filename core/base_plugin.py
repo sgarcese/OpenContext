@@ -46,6 +46,7 @@ _ISO_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}")
 # Hostname safe to echo back to the model when a URL's host is untrusted.
 _SAFE_HOSTNAME = re.compile(r"^[a-z0-9]([a-z0-9-]{0,62}\.)*[a-z0-9-]{1,63}$")
 
+
 def _host_is_trusted(host: str, trusted: Iterable[str]) -> bool:
     """Whether ``host`` equals or is a subdomain of any trusted host."""
     host = (host or "").lower()

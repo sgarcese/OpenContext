@@ -5,6 +5,7 @@ interactions, ODSQL validation, error handling, and data formatting. All
 network access is mocked; no live portal is contacted.
 """
 
+from typing import ClassVar
 from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
@@ -1053,3 +1054,56 @@ class TestCodeReviewFixes:
         result = await plugin.aggregate_data("d", metrics={"n": "count()"})
         assert result.get("error") is True
         assert "metric expression" in result["message"]
+
+
+class TestMetadataEnrichment:
+    ENRICHED: ClassVar[dict] = {
+        "dataset_id": "police-calls",
+        "metas": {
+            "default": {
+                "title": "Police Calls",
+                "description": "Dispatch calls",
+                "records_count": 4321,
+                "modified": "2026-01-15T08:00:00+00:00",
+                "data_processed": "2026-01-16T01:00:00+00:00",
+                "metadata_processed": "2026-01-14",
+                "publisher": "Long Beach PD",
+                "license": "Open Database License",
+                "license_url": "https://opendatacommons.org/licenses/odbl/",
+                "attributions": ["LBPD", "City of Long Beach"],
+                "references": "https://data.longbeach.gov/pages/police/",
+                "theme": ["Public Safety"],
+            }
+        },
+        "fields": [{"name": "a"}, {"name": "b"}],
+    }
+
+    def test_format_dataset_surfaces_publisher_license_dates(self):
+        plugin, _ = _initialized_plugin()
+        out = plugin._format_dataset(self.ENRICHED)
+        assert "Publisher: Long Beach PD" in out
+        assert "License: Open Database License — (external: opendatacommons.org)" in out
+        assert "Attribution: LBPD, City of Long Beach" in out
+        assert (
+            "Last modified: 2026-01-15 | Data processed: 2026-01-16 | "
+            "Metadata processed: 2026-01-14"
+        ) in out
+        assert "Records: 4321 | Fields: 2" in out
+        assert "References: https://data.longbeach.gov/pages/police/" in out
+
+    def test_search_results_header_and_facts(self):
+        plugin, _ = _initialized_plugin()
+        out = plugin._format_search_results([self.ENRICHED], total=88)
+        assert out.startswith(
+            "Found 88 matching dataset(s) in Long Beach's open data portal (showing 1-1):"
+        )
+        assert "Publisher: Long Beach PD | Modified: 2026-01-15 | Records: 4321" in out
+
+    @pytest.mark.asyncio
+    async def test_search_tool_uses_total_count(self):
+        plugin, _ = _initialized_plugin(
+            get_return={"total_count": 88, "results": [self.ENRICHED]}
+        )
+        result = await plugin.execute_tool("search_datasets", {"query": "police"})
+        assert result.success
+        assert "Found 88 matching dataset(s)" in result.content[0]["text"]

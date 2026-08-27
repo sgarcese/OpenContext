@@ -201,22 +201,26 @@ class TestExecuteTool:
 
         with patch.object(
             plugin,
-            "search_datasets",
+            "_search_hub",
             new_callable=AsyncMock,
-            return_value=[
-                {
-                    "id": "abc123",
-                    "title": "Test Dataset",
-                    "tags": [],
-                    "description": "desc",
-                }
-            ],
+            return_value={
+                "results": [
+                    {
+                        "id": "abc123",
+                        "title": "Test Dataset",
+                        "tags": [],
+                        "description": "desc",
+                    }
+                ],
+                "total": 7,
+            },
         ) as mock_search:
             result = await plugin.execute_tool("search_datasets", {"query": "test"})
 
         assert result.success is True
         assert len(result.content) > 0
         assert "text" in result.content[0]
+        assert "Found 7 matching dataset(s)" in result.content[0]["text"]
         mock_search.assert_called_once_with("test", 10)
 
     @pytest.mark.asyncio
@@ -1160,3 +1164,73 @@ class TestCodeReviewFixes:
         assert "Record 10:" in text
         assert "Record 11:" not in text
         assert "... and 40 more record(s)" in text
+
+
+class TestMetadataEnrichment:
+    @pytest.fixture
+    def plugin(self, arcgis_config):
+        return ArcGISPlugin(arcgis_config)
+
+    def test_format_dataset_surfaces_dates_size_org(self, plugin):
+        dataset = {
+            "id": "abc123",
+            "title": "Parcels",
+            "type": "Feature Service",
+            "access": "public",
+            "owner": "gis_admin",
+            "orgName": "City GIS",
+            "created": "2020-01-01",
+            "modified": "2026-02-02",
+            "lastEditDate": "2026-02-03",
+            "numRecords": 1200,
+            "size": 1048576,
+            "licenseInfo": "CC BY 4.0",
+            "description": "Parcel polygons",
+            "tags": ["parcels"],
+            "categories": ["/Categories/Planning"],
+            "typeKeywords": ["ArcGIS Server", "Feature Service"],
+            "url": "https://services.arcgis.com/x/FeatureServer/0",
+            "service_url": "https://evil.example.org/FeatureServer/0",
+        }
+        out = plugin._format_dataset(dataset)
+        assert "Owner: gis_admin (City GIS)" in out
+        assert (
+            "Created: 2020-01-01 | Modified: 2026-02-02 | Last edit: 2026-02-03" in out
+        )
+        assert "Records: 1200 | Size: 1.0 MB" in out
+        assert "License: CC BY 4.0" in out
+        assert "Categories: /Categories/Planning" in out
+        assert "Type keywords: ArcGIS Server, Feature Service" in out
+        assert "URL: https://services.arcgis.com/x/FeatureServer/0" in out
+        assert "Service URL: (external: evil.example.org)" in out
+        assert "Extent" not in out
+        assert "Snippet" not in out
+
+    def test_search_results_header_and_facts(self, plugin):
+        hits = [
+            {
+                "id": "abc123",
+                "title": "Parcels",
+                "owner": "gis_admin",
+                "created": "2020-01-01",
+                "modified": "2026-02-02",
+                "recordCount": 5,
+                "tags": [],
+            }
+        ]
+        out = plugin._format_search_results(hits, total=300)
+        assert out.startswith(
+            "Found 300 matching dataset(s) in TestCity's open data portal (showing 1-1):"
+        )
+        assert (
+            "Owner: gis_admin | Created: 2020-01-01 | Modified: 2026-02-02 | Records: 5"
+            in out
+        )
+
+    def test_summary_dates_from_epoch_ms(self):
+        summary = ArcGISPlugin._extract_dataset_summary(
+            {"id": "x", "created": 1577836800000, "modified": None, "recordCount": 3}
+        )
+        assert summary["created"] == "2020-01-01"
+        assert summary["modified"] == ""
+        assert summary["recordCount"] == 3
