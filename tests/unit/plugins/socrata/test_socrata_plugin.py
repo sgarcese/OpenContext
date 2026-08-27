@@ -804,36 +804,36 @@ class TestFormatMethods:
         datasets = [
             {
                 "resource": {
-                    "id": "abc-1234",
+                    "id": "abcd-1234",
                     "name": "Budget Data",
                     "description": "City budget",
                     "category": "Finance",
-                    "permalink": "https://data.cityofboston.gov/d/abc-1234",
+                    "permalink": "https://data.cityofboston.gov/d/abcd-1234",
                 }
             }
         ]
         result = plugin._format_search_results(datasets)
         assert "Budget Data" in result
         assert "Finance" in result
-        assert "abc-1234" in result
+        assert "abcd-1234" in result
 
     def test_format_search_results_no_permalink(self, plugin):
         datasets = [
             {
                 "resource": {
-                    "id": "abc-1234",
+                    "id": "abcd-1234",
                     "name": "Budget Data",
                     "description": "City budget",
                 }
             }
         ]
         result = plugin._format_search_results(datasets)
-        assert "abc-1234" in result
-        assert "data.cityofboston.gov/d/abc-1234" in result
+        assert "abcd-1234" in result
+        assert "data.cityofboston.gov/d/abcd-1234" in result
 
     def test_format_dataset(self, plugin):
         dataset = {
-            "id": "abc-1234",
+            "id": "abcd-1234",
             "name": "311 Service Requests",
             "description": "All 311 calls",
             "rowCount": 500000,
@@ -844,7 +844,7 @@ class TestFormatMethods:
         }
         result = plugin._format_dataset(dataset)
         assert "311 Service Requests" in result
-        assert "abc-1234" in result
+        assert "abcd-1234" in result
         assert "500000" in result
         assert "service" in result
         assert "Public Safety" in result
@@ -852,7 +852,11 @@ class TestFormatMethods:
     def test_format_dataset_minimal(self, plugin):
         result = plugin._format_dataset({})
         assert "Untitled" in result
-        assert "get_schema" in result
+        assert "ID: unknown" in result
+        # Connector guidance lives on the ToolHandler, outside the data body.
+        assert "get_schema" not in result
+        assert plugin.tool_handlers()["get_dataset"].guidance is not None
+        assert "get_schema" in plugin.tool_handlers()["get_dataset"].guidance
 
     def test_format_schema_empty(self, plugin):
         result = plugin._format_schema([])

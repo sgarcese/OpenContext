@@ -68,6 +68,7 @@ Details: [Getting Started — full walkthrough](docs/GETTING_STARTED.md) (sectio
 | [Custom Plugins](docs/CUSTOM_PLUGINS.md)   | How to write your own plugin                    |
 | [Deployment](docs/DEPLOYMENT.md)           | AWS & GCP (`--cloud`), Terraform, monitoring    |
 | [Testing](docs/TESTING.md)                 | Local testing (Terminal, Claude, MCP Inspector) |
+| [Security](docs/SECURITY.md)               | Threat model, prompt-injection guardrails       |
 
 
 ---
