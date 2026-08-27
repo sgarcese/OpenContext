@@ -273,6 +273,7 @@ class PluginManager:
                 "name": prefixed_name,
                 "description": tool_def.description,
                 "inputSchema": tool_def.input_schema,
+                "annotations": tool_def.annotations,
             }
             for prefixed_name, (_, tool_def) in self.tools.items()
         ]

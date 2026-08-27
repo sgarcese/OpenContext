@@ -199,3 +199,4 @@ Single `config.yaml`; passed to Lambda via `OPENCONTEXT_CONFIG`. Validated at de
 - **Lambda URL:** Public—testing only
 - **Stateless:** No shared state; Lambda auto-scales
 - **Logging:** CloudWatch, structured JSON, request IDs
+- **Untrusted portal content:** every tool result is framed, normalized, and size-capped before it reaches the model; see [Security](SECURITY.md)
