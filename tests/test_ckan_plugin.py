@@ -10,7 +10,12 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx
 import pytest
 
-from plugins.ckan.plugin import CKANPlugin
+from plugins.ckan.plugin import (
+    _SORT_OPTIONS,
+    CKANPlugin,
+    _build_fq,
+    _escape_solr_phrase,
+)
 
 
 class TestPluginInitialization:
@@ -1086,12 +1091,6 @@ class TestAggregateDataUsability:
 
 
 # ── Catalog metadata enrichment, browse and facet tools ─────────────────────
-
-from plugins.ckan.plugin import (
-    _SORT_OPTIONS,
-    _build_fq,
-    _escape_solr_phrase,
-)
 
 
 def _catalog_plugin(ckan_config, result):
