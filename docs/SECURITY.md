@@ -16,6 +16,9 @@ IDs that the connector forwards to the portal. Defenses:
   BY`, and `HAVING` values assembled by `aggregate_data`.
 - **`build_where_clause`** escapes values and rejects non-identifier field
   names.
+- **Catalog filter whitelisting (CKAN)** (`_build_fq`) restricts `list_datasets`
+  / `get_catalog_stats` filters to known Solr fields and quotes values as
+  escaped Solr phrases, so model-supplied filter values cannot alter the query.
 - **ArcGIS SSRF allow-list** (`_validate_feature_url`, `trusted_service_hosts`)
   stops a dataset record from steering Feature Service requests to arbitrary
   hosts.
@@ -46,7 +49,7 @@ All of this lives in `core/portal_content.py` and is applied centrally by
 | **Structure forgery prevention** | `format_records`, `indent_continuation` | Record keys are single-line; multi-line values have every continuation line indented, so a value cannot start a fake `Record 2:` header or a fake connector instruction at column 0. |
 | **Size caps** | `DEFAULT_MAX_TEXT` (4 000 chars/value), `DEFAULT_MAX_LINE` (300), `DEFAULT_MAX_RESPONSE` (60 000/body), `DEFAULT_MAX_ERROR` (500) | Limits context stuffing. |
 | **ID validation** | `safe_id` with a per-plugin `id_pattern` | An ID is only interpolated into a `Portal:` URL or a hint if it matches the provider's ID shape (Socrata 4x4, CKAN slug/UUID, Hub hex, ODS slug); otherwise it renders as `unknown` and no link is built. Links are always built from config + validated ID, never echoed from the portal. |
-| **URL gating (ArcGIS)** | `_display_url` | Portal-supplied URLs are shown only if their host passes the same allow-list that gates fetching. |
+| **URL gating** | `BaseOpenDataPlugin.display_portal_url` (ArcGIS `_display_url` wraps it with `trusted_service_hosts`) | Portal-supplied URLs (resource downloads, license/attribution links, service endpoints) are echoed only when their host is the portal/API host or a subdomain of it (or an explicitly trusted host); otherwise only `(external: hostname)` is shown, never the URL itself. |
 | **Error bodies** | `_raise_http_error`, `clean_error_message`, `mcp_server` error `data` | Portal error text is capped, flattened, and labeled `portal said: '…'`. |
 | **Injection heuristics** | `detect_injection_markers` | A conservative regex scan (instruction overrides, role markers, chat-template tokens, exfiltration verbs, markdown image beacons, hidden HTML). A hit never blocks; it prepends a `WARNING:` line in the connector's voice and logs a `Possible prompt injection markers` entry with the tool name so operators can find poisoned records in CloudWatch. |
 | **Tool annotations** | `ToolDefinition.annotations` | Every tool advertises `readOnlyHint: true, openWorldHint: true` so hosts can treat results as untrusted. |

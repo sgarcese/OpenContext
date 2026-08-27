@@ -21,8 +21,10 @@ plugins:
 
 ### Tools
 
-- `ckan__search_datasets(query, limit)` - Search for datasets
-- `ckan__get_dataset(dataset_id)` - Get dataset metadata
+- `ckan__search_datasets(query, limit)` - Free-text search; header reports the catalog-wide match count
+- `ckan__list_datasets(query, organization, tag, format, license, group, sort, limit, offset)` - Browse the catalog with exact-match filters, sorting (default: most recently modified first) and paging; returns the total count plus organization, modified date, resource count and formats per dataset
+- `ckan__get_catalog_stats(facets, query, organization, tag, format, license, group, limit)` - Count public datasets overall and per organization / tag / resource format / license / group (from the portal search index); values it returns are the exact filter values `list_datasets` accepts
+- `ckan__get_dataset(dataset_id, max_resources)` - Full dataset metadata: organization (title + slug), license, created/modified dates, tags, groups, and every resource with ID, format, created/modified dates, size, DataStore flag, download URL and description. Datasets split by year expose one resource per year, so resource names/dates/URLs date each slice. `max_resources` defaults to 50 (max 500)
 - `ckan__query_data(resource_id, filters, limit)` - Query data from a resource
 - `ckan__get_schema(resource_id)` - Get schema for a resource
 - `ckan__execute_sql(sql)` - Execute a validated `SELECT` query against the datastore
@@ -33,6 +35,11 @@ plugins:
 - `having` keys are aggregate expressions or declared metric aliases; string values may carry a comparison operator (`{"count(*)": ">= 5"}`), bare numbers default to `>`
 - `order_by` accepts `"field"`, `"-field"` (descending), or `"field ASC|DESC"`
 - All identifiers and expressions are validated against safe whitelists before SQL is built
+
+**Catalog browsing notes:**
+- `list_datasets` / `get_catalog_stats` filters are exact matches on CKAN's search index (Solr). Filter names are whitelisted and values are quoted/escaped as Solr phrases, so operators and wildcards in values are inert
+- Resource download URLs are shown verbatim only when their host is the portal's own host (or a subdomain); other hosts render as `(external: hostname)`
+- Counts cover public datasets only (private/draft datasets are not in the search index)
 
 ### Examples
 
