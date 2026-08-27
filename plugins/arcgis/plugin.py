@@ -14,6 +14,7 @@ import httpx
 
 from core.base_plugin import HTTP_RETRY, BaseOpenDataPlugin, ToolHandler
 from core.interfaces import PluginType, ToolDefinition, ToolResult
+from core.portal_content import join_cleaned
 from plugins.arcgis.config_schema import ArcGISPluginConfig
 from plugins.arcgis.where_validator import WhereValidator
 
@@ -34,6 +35,10 @@ class ArcGISPlugin(BaseOpenDataPlugin):
     plugin_version = "1.0.0"
 
     config_class = ArcGISPluginConfig
+    # Hub item IDs are 32-char hex; allow the underscore/hyphen variants seen
+    # in layer references (e.g. abcdef..._0).
+    id_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+    provider_label = "ArcGIS Hub catalog"
 
     QUERYABLE_TYPES = {
         "Feature Layer",
@@ -267,10 +272,20 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         """
         return {
             "search_datasets": ToolHandler(
-                handler=self._tool_search_datasets, required_args=("query",)
+                handler=self._tool_search_datasets,
+                required_args=("query",),
+                guidance=(
+                    "Use the get_dataset tool with a dataset ID from the list "
+                    "to get details, then get_schema and query_data."
+                ),
             ),
             "get_dataset": ToolHandler(
-                handler=self._tool_get_dataset, required_args=("dataset_id",)
+                handler=self._tool_get_dataset,
+                required_args=("dataset_id",),
+                guidance=(
+                    "Use the get_schema tool with this dataset's ID to list "
+                    "fields, then query_data to query features."
+                ),
             ),
             "get_aggregations": ToolHandler(
                 handler=self._tool_get_aggregations, required_args=("field",)
@@ -704,41 +719,64 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         lines = [f"Found {len(datasets)} dataset(s):\n"]
 
         for i, ds in enumerate(datasets, 1):
-            tags = ", ".join(ds.get("tags", [])) if ds.get("tags") else "None"
-            lines.append(f"{i}. {ds.get('title', 'Untitled')}")
-            lines.append(f"   ID: {ds.get('id', 'unknown')}")
-            lines.append(f"   Type: {ds.get('type', 'unknown')}")
-            lines.append(f"   Access: {ds.get('access', 'unknown')}")
-            lines.append(f"   Description: {ds.get('description', 'No description')}")
-            lines.append(f"   URL: {ds.get('url', '')}")
+            tags = join_cleaned(ds.get("tags", [])) if ds.get("tags") else "None"
+            lines.append(f"{i}. {self.portal_line(ds.get('title'), default='Untitled')}")
+            lines.append(f"   ID: {self.safe_id(ds.get('id'))}")
+            lines.append(f"   Type: {self.portal_line(ds.get('type'), default='unknown')}")
+            lines.append(f"   Access: {self.portal_line(ds.get('access'), default='unknown')}")
+            lines.append(
+                f"   Description: {self.portal_line(ds.get('description'), max_len=300, default='No description')}"
+            )
+            lines.append(f"   URL: {self._display_url(ds.get('url'))}")
             lines.append(f"   Tags: {tags}")
             lines.append("")
 
         return "\n".join(lines)
 
     def _format_dataset(self, dataset: dict[str, Any]) -> str:
-        tags = ", ".join(dataset.get("tags", [])) if dataset.get("tags") else "None"
+        tags = join_cleaned(dataset.get("tags", [])) if dataset.get("tags") else "None"
+        line = self.portal_line
         lines = [
-            f"Dataset: {dataset.get('title', 'Untitled')}",
-            f"ID: {dataset.get('id', 'unknown')}",
-            f"Type: {dataset.get('type', 'unknown')}",
-            f"Access: {dataset.get('access', 'unknown')}",
-            f"Owner: {dataset.get('owner', 'unknown')}",
-            f"Created: {dataset.get('created', '')}",
-            f"Modified: {dataset.get('modified', '')}",
-            f"Description: {dataset.get('description', 'No description')}",
-            f"Snippet: {dataset.get('snippet', '')}",
-            f"License: {dataset.get('licenseInfo', '')}",
-            f"Spatial Reference: {dataset.get('spatialReference', '')}",
-            f"Geometry Type: {dataset.get('geometryType', '')}",
-            f"Number of Records: {dataset.get('numRecords', 'N/A')}",
+            f"Dataset: {line(dataset.get('title'), default='Untitled')}",
+            f"ID: {self.safe_id(dataset.get('id'))}",
+            f"Type: {line(dataset.get('type'), default='unknown')}",
+            f"Access: {line(dataset.get('access'), default='unknown')}",
+            f"Owner: {line(dataset.get('owner'), default='unknown')}",
+            f"Created: {line(dataset.get('created'))}",
+            f"Modified: {line(dataset.get('modified'))}",
+            f"Description: {self.portal_block(dataset.get('description'), default='No description')}",
+            f"Snippet: {line(dataset.get('snippet'))}",
+            f"License: {self.portal_block(dataset.get('licenseInfo'), max_len=1000)}",
+            f"Spatial Reference: {line(dataset.get('spatialReference'))}",
+            f"Geometry Type: {line(dataset.get('geometryType'))}",
+            f"Number of Records: {line(dataset.get('numRecords'), default='N/A')}",
             f"Tags: {tags}",
-            f"Extent: {dataset.get('extent', [])}",
-            f"Additional Resources: {dataset.get('additionalResources', [])}",
-            f"URL: {dataset.get('url', '')}",
-            f"Service URL (use for query_data): {dataset.get('service_url', '')}",
+            f"Extent: {line(dataset.get('extent', []))}",
+            f"Additional Resources: {line(dataset.get('additionalResources', []), max_len=1000)}",
+            f"URL: {self._display_url(dataset.get('url'))}",
+            f"Service URL: {self._display_url(dataset.get('service_url'))}",
         ]
         return "\n".join(lines)
+
+    def _display_url(self, url: Any) -> str:
+        """Render a portal-supplied URL only if its host is trusted.
+
+        Reuses :meth:`_validate_feature_url` so the same allow-list that
+        gates *fetching* also gates what the model is *shown*; an attacker
+        cannot plant a link to an arbitrary host in a dataset record.
+        """
+        if not url:
+            return ""
+        cleaned = self.portal_line(url, max_len=500)
+        try:
+            self._validate_feature_url(
+                cleaned,
+                self.plugin_config.portal_url,
+                self.plugin_config.trusted_service_hosts,
+            )
+        except ValueError:
+            return "(omitted: URL host is not in the trusted list)"
+        return cleaned
 
     def _format_schema(self, fields: list[dict[str, Any]]) -> str:
         """Format schema information for user display."""
@@ -747,9 +785,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
         lines = ["Schema fields:"]
         for field in fields:
-            name = field.get("name", "unknown")
-            ftype = field.get("type", "unknown")
-            alias = field.get("alias", "")
+            name = self.portal_line(field.get("name"), default="unknown")
+            ftype = self.portal_line(field.get("type"), default="unknown")
+            alias = self.portal_line(field.get("alias"))
             lines.append(f"  • {name} ({ftype})")
             if alias and alias != name:
                 lines.append(f"    Alias: {alias}")
@@ -774,8 +812,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         lines = [f"Aggregations for '{field}':\n"]
         for bucket in buckets:
             lines.append(
-                f"  {bucket.get('key', 'unknown')}: "
-                f"{bucket.get('doc_count', bucket.get('count', 0))} dataset(s)"
+                f"  {self.portal_line(bucket.get('key'), default='unknown')}: "
+                f"{self.portal_line(bucket.get('doc_count', bucket.get('count', 0)))} dataset(s)"
             )
 
         return "\n".join(lines)

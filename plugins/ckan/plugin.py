@@ -11,6 +11,7 @@ import httpx
 
 from core.base_plugin import BaseOpenDataPlugin, HTTP_RETRY, ToolHandler
 from core.interfaces import PluginType, ToolDefinition, ToolResult
+from core.portal_content import join_cleaned
 from plugins.ckan.config_schema import CKANPluginConfig
 from plugins.ckan.sql_validator import SQLValidator
 
@@ -73,6 +74,9 @@ class CKANPlugin(BaseOpenDataPlugin):
     plugin_version = "1.0.0"
 
     config_class = CKANPluginConfig
+    # CKAN dataset/resource IDs are UUIDs or URL slugs.
+    id_pattern = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
+    provider_label = "open data portal (CKAN)"
 
     async def initialize(self) -> bool:
         """Initialize CKAN plugin and test connection.
@@ -317,10 +321,19 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
             "search_datasets": ToolHandler(
                 handler=self._tool_search_datasets,
                 required_args=("query",),
+                guidance=(
+                    f"View all datasets at: {self.plugin_config.portal_url}\n"
+                    "Use the get_dataset tool with a dataset ID from the list "
+                    "to get details and resource IDs."
+                ),
             ),
             "get_dataset": ToolHandler(
                 handler=self._tool_get_dataset,
                 required_args=("dataset_id",),
+                guidance=(
+                    "Use the get_schema or query_data tool with a Resource ID "
+                    "from the list above to inspect or query its data."
+                ),
             ),
             "query_data": ToolHandler(
                 handler=self._tool_query_data,
@@ -679,35 +692,31 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
         ]
 
         for i, dataset in enumerate(datasets, 1):
-            title = dataset.get("title", "Untitled")
-            dataset_id = dataset.get("id", "unknown")
-            notes = (
-                dataset.get("notes", "")[:100] + "..."
-                if dataset.get("notes")
-                else "No description"
+            title = self.portal_line(dataset.get("title"), default="Untitled")
+            dataset_id = self.safe_id(dataset.get("id"))
+            notes = self.portal_line(
+                dataset.get("notes"), max_len=100, default="No description"
             )
 
             lines.append(f"{i}. {title}")
             lines.append(f"   ID: {dataset_id}")
             lines.append(f"   Description: {notes}")
-            lines.append(
-                f"   Portal: {self.plugin_config.portal_url}/dataset/{dataset_id}"
-            )
+            if dataset_id != "unknown":
+                lines.append(
+                    f"   Portal: {self.plugin_config.portal_url}/dataset/{dataset_id}"
+                )
             lines.append("")
-
-        lines.append(
-            f"View all datasets at: {self.plugin_config.portal_url}\n"
-            f"Use get_dataset tool with a dataset ID to get more details."
-        )
 
         return "\n".join(lines)
 
     def _format_dataset(self, dataset: Dict[str, Any]) -> str:
         """Format dataset metadata for user display."""
-        title = dataset.get("title", "Untitled")
-        dataset_id = dataset.get("id", "unknown")
-        notes = dataset.get("notes", "No description")
-        organization = dataset.get("organization", {}).get("title", "Unknown")
+        title = self.portal_line(dataset.get("title"), default="Untitled")
+        dataset_id = self.safe_id(dataset.get("id"))
+        notes = self.portal_block(dataset.get("notes"), default="No description")
+        organization = self.portal_line(
+            (dataset.get("organization") or {}).get("title"), default="Unknown"
+        )
         resources = dataset.get("resources", [])
 
         lines = [
@@ -716,21 +725,21 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
             f"Organization: {organization}",
             f"Description: {notes}",
             "",
-            f"Portal URL: {self.plugin_config.portal_url}/dataset/{dataset_id}",
-            "",
         ]
+        if dataset_id != "unknown":
+            lines.append(
+                f"Portal URL: {self.plugin_config.portal_url}/dataset/{dataset_id}"
+            )
+            lines.append("")
 
         if resources:
             lines.append(f"Resources ({len(resources)}):")
             for i, resource in enumerate(resources, 1):
-                res_name = resource.get("name", "Unnamed")
-                res_id = resource.get("id", "unknown")
-                res_format = resource.get("format", "unknown")
+                res_name = self.portal_line(resource.get("name"), default="Unnamed")
+                res_id = self.safe_id(resource.get("id"))
+                res_format = self.portal_line(resource.get("format"), default="unknown")
                 lines.append(f"  {i}. {res_name} ({res_format})")
                 lines.append(f"     Resource ID: {res_id}")
-                lines.append(
-                    f"     Use query_data tool with resource_id='{res_id}' to query this data"
-                )
         else:
             lines.append("No resources available for this dataset.")
 
@@ -754,10 +763,12 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
 
         lines = ["Schema fields:"]
         for field in fields:
-            field_id = field.get("id", "unknown")
-            field_type = field.get("type", "unknown")
+            field_id = self.portal_line(field.get("id"), default="unknown")
+            field_type = self.portal_line(field.get("type"), default="unknown")
             field_info = field.get("info", {})
-            description = field_info.get("label", "") if field_info else ""
+            description = (
+                self.portal_line(field_info.get("label")) if field_info else ""
+            )
 
             lines.append(f"  • {field_id} ({field_type})")
             if description:
@@ -784,7 +795,7 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
         # Show field names if available
         if fields:
             field_names = [field.get("id", "unknown") for field in fields]
-            header_lines.append(f"Fields: {', '.join(field_names)}")
+            header_lines.append(f"Fields: {join_cleaned(field_names)}")
 
         header = "\n".join(header_lines)
         return self.format_records(records, max_display=10, header=header)
