@@ -1,1 +1,49 @@
-examples/dc-arcgis/config.yaml
+---
+server_name: "Boston OpenData MCP Server"
+description: "MCP server for Boston's CKAN open data portal"
+organization: "City of Boston"
+
+plugins:
+  ckan:
+    enabled: true
+    base_url: "https://data.boston.gov"
+    portal_url: "https://data.boston.gov"
+    city_name: "Boston"
+    timeout: 120
+
+aws:
+  region: "us-east-1"
+  lambda_name: "opencontext-mcp-server"
+  lambda_memory: 512
+  lambda_timeout: 120
+
+auth:
+  enabled: true
+  # These three follow --environment via terraform custom_domain:
+  # staging → data-mcp-staging.boston.gov, prod → data-mcp.boston.gov
+  resource: "${OAUTH_RESOURCE}"
+  authorization_servers:
+    - "${OAUTH_AUTHORIZATION_SERVER}"
+  scopes_supported:
+    - "openid"
+  required_scopes:
+    - "openid"
+  jwt:
+    issuer: "${OAUTH_ISSUER}"
+    jwks_uri: "${OAUTH_JWKS_URI}"
+    audience: "${OAUTH_AUDIENCE}"
+    algorithms:
+      - "RS256"
+  # Opaque access tokens (common for Strivacity/Home) are validated here.
+  userinfo_endpoint: "${OAUTH_USERINFO_ENDPOINT}"
+  oauth_proxy:
+    enabled: true
+    authorization_endpoint: "${OAUTH_AUTHORIZATION_ENDPOINT}"
+    token_endpoint: "${OAUTH_TOKEN_ENDPOINT}"
+    callback_url: "${OAUTH_CALLBACK_URL}"
+    client_id: "${OAUTH_CLIENT_ID}"
+    client_secret: "${OAUTH_CLIENT_SECRET}"
+
+logging:
+  level: "INFO"
+  format: "json"

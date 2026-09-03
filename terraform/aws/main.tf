@@ -35,6 +35,37 @@ locals {
   lambda_memory  = local.config.aws.lambda_memory != null ? local.config.aws.lambda_memory : var.lambda_memory
   lambda_timeout = local.config.aws.lambda_timeout != null ? local.config.aws.lambda_timeout : var.lambda_timeout
 
+  # MCP public origin from the environment tfvars custom_domain. config.yaml
+  # can reference these via ${OAUTH_RESOURCE} / ${OAUTH_CALLBACK_URL} /
+  # ${OAUTH_AUTHORIZATION_SERVER} so one config works for staging and prod.
+  mcp_origin                 = var.custom_domain != "" ? "https://${trimsuffix(var.custom_domain, "/")}" : ""
+  oauth_resource             = local.mcp_origin != "" ? "${local.mcp_origin}/mcp" : ""
+  oauth_callback_url         = local.mcp_origin != "" ? "${local.mcp_origin}/oauth2/callback" : ""
+  oauth_authorization_server = local.mcp_origin
+
+  # IdP hostname lives in secrets.<env>.tfvars. Standard Strivacity paths
+  # are derived unless an explicit URL override is set.
+  oauth_idp_host_normalized = trimsuffix(
+    replace(replace(var.oauth_idp_host, "https://", ""), "http://", ""),
+    "/"
+  )
+  oauth_idp_origin = local.oauth_idp_host_normalized != "" ? "https://${local.oauth_idp_host_normalized}" : ""
+  oauth_issuer = var.oauth_issuer != "" ? var.oauth_issuer : (
+    local.oauth_idp_origin != "" ? "${local.oauth_idp_origin}/" : ""
+  )
+  oauth_jwks_uri = var.oauth_jwks_uri != "" ? var.oauth_jwks_uri : (
+    local.oauth_idp_origin != "" ? "${local.oauth_idp_origin}/.well-known/jwks.json" : ""
+  )
+  oauth_authorization_endpoint = var.oauth_authorization_endpoint != "" ? var.oauth_authorization_endpoint : (
+    local.oauth_idp_origin != "" ? "${local.oauth_idp_origin}/oauth2/auth" : ""
+  )
+  oauth_token_endpoint = var.oauth_token_endpoint != "" ? var.oauth_token_endpoint : (
+    local.oauth_idp_origin != "" ? "${local.oauth_idp_origin}/oauth2/token" : ""
+  )
+  oauth_userinfo_endpoint = var.oauth_userinfo_endpoint != "" ? var.oauth_userinfo_endpoint : (
+    local.oauth_idp_origin != "" ? "${local.oauth_idp_origin}/userinfo" : ""
+  )
+
   # Serialize config to JSON for environment variable
   config_json = jsonencode(local.config)
 }
@@ -82,13 +113,52 @@ resource "aws_lambda_function" "mcp_server" {
   timeout          = local.lambda_timeout
 
   environment {
-    variables = {
-      OPENCONTEXT_CONFIG = local.config_json
-    }
+    variables = merge(
+      {
+        OPENCONTEXT_CONFIG = local.config_json
+      },
+      local.oauth_issuer != "" ? {
+        OAUTH_ISSUER = local.oauth_issuer
+      } : {},
+      local.oauth_jwks_uri != "" ? {
+        OAUTH_JWKS_URI = local.oauth_jwks_uri
+      } : {},
+      var.oauth_audience != "" ? {
+        OAUTH_AUDIENCE = var.oauth_audience
+      } : {},
+      local.oauth_authorization_endpoint != "" ? {
+        OAUTH_AUTHORIZATION_ENDPOINT = local.oauth_authorization_endpoint
+      } : {},
+      local.oauth_token_endpoint != "" ? {
+        OAUTH_TOKEN_ENDPOINT = local.oauth_token_endpoint
+      } : {},
+      local.oauth_userinfo_endpoint != "" ? {
+        OAUTH_USERINFO_ENDPOINT = local.oauth_userinfo_endpoint
+      } : {},
+      local.oauth_resource != "" ? {
+        OAUTH_RESOURCE = local.oauth_resource
+      } : {},
+      local.oauth_callback_url != "" ? {
+        OAUTH_CALLBACK_URL = local.oauth_callback_url
+      } : {},
+      local.oauth_authorization_server != "" ? {
+        OAUTH_AUTHORIZATION_SERVER = local.oauth_authorization_server
+      } : {},
+      var.oauth_client_id != "" ? {
+        OAUTH_CLIENT_ID = var.oauth_client_id
+      } : {},
+      var.oauth_client_secret != "" ? {
+        OAUTH_CLIENT_SECRET = var.oauth_client_secret
+      } : {},
+      {
+        OAUTH_PENDING_TABLE_NAME = aws_dynamodb_table.oauth_pending.name
+      }
+    )
   }
 
   depends_on = [
     aws_iam_role_policy_attachment.lambda_basic,
+    aws_iam_role_policy.lambda_oauth_pending,
   ]
 }
 

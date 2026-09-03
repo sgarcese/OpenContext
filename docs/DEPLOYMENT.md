@@ -25,8 +25,9 @@ aws configure
 cp config-example.yaml config.yaml
 # Edit config.yaml - enable exactly ONE plugin
 
-# Deploy (validates config, packages, deploys)
-./scripts/deploy.sh
+# Deploy to staging or the existing prod stack
+./scripts/deploy.sh --environment staging
+./scripts/deploy.sh --environment prod
 ```
 
 ### Manual Terraform
@@ -121,3 +122,16 @@ terraform destroy -var="config_file=config.yaml"
 - Use API Gateway for production (rate limiting, quota)
 - Lambda URL is public—testing only
 - Store secrets in env vars, not code
+
+## OAuth (Strivacity)
+
+Staging and prod use different Strivacity tenants and different confidential clients. Switch with `--environment`; do not reuse one client ID/secret for both.
+
+Put hostname, client ID, and secret in the gitignored secrets file:
+
+| Environment | Secrets file |
+|-------------|--------------|
+| `staging` | `terraform/aws/secrets.staging.tfvars` |
+| `prod` | `terraform/aws/secrets.prod.tfvars` |
+
+Copy `terraform/aws/secrets.tfvars.example`. Set `oauth_idp_host` (no `https://`); Terraform derives issuer, JWKS, authorize, token, and userinfo URLs. MCP resource and callback URLs still come from `custom_domain` in `staging.tfvars` / `prod.tfvars`. Keep `${OAUTH_*}` placeholders in `config.yaml`.

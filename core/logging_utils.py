@@ -273,6 +273,169 @@ def sanitize_request_body(body: str) -> Dict[str, Any]:
         return {"raw_body": "[REDACTED]" if len(body) > 0 else ""}
 
 
+OAUTH_QUERY_REDACT_KEYS = {
+    "code",
+    "code_verifier",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "client_secret",
+}
+
+
+def summarize_query_string(query_string: str) -> Dict[str, Any]:
+    """Summarize a query string without leaking OAuth secrets."""
+    from urllib.parse import parse_qsl, urlparse
+
+    params = dict(parse_qsl(query_string, keep_blank_values=True))
+    redirect_uri = params.get("redirect_uri", "")
+    parsed_redirect = urlparse(redirect_uri) if redirect_uri else None
+    safe_params: Dict[str, Any] = {}
+    for key, value in params.items():
+        if key in OAUTH_QUERY_REDACT_KEYS:
+            safe_params[key] = "[REDACTED]"
+        elif key == "state":
+            safe_params["state_length"] = len(value)
+            safe_params["state_present"] = bool(value)
+        elif key == "code_challenge":
+            safe_params["code_challenge_present"] = bool(value)
+            safe_params["code_challenge_length"] = len(value)
+        elif key in {"client_id", "scope", "response_type", "code_challenge_method"}:
+            safe_params[key] = value
+        else:
+            safe_params[key] = value
+
+    return {
+        "query_keys": sorted(params.keys()),
+        "query_params_safe": safe_params,
+        "has_code": bool(params.get("code")),
+        "has_error": bool(params.get("error")),
+        "has_state": bool(params.get("state")),
+        "state_length": len(params.get("state", "")),
+        "has_redirect_uri": bool(redirect_uri),
+        "redirect_uri_host": parsed_redirect.netloc if parsed_redirect else None,
+        "redirect_uri_path": parsed_redirect.path if parsed_redirect else None,
+        "redirect_query_keys": (
+            sorted(dict(parse_qsl(parsed_redirect.query)).keys())
+            if parsed_redirect and parsed_redirect.query
+            else []
+        ),
+    }
+
+
+def summarize_response_body(body: str, content_type: str = "") -> Dict[str, Any]:
+    """Summarize a response body for structured logging."""
+    content_type_lower = content_type.lower()
+    if not body:
+        return {"response_body_kind": "empty", "response_body_length": 0}
+
+    if "text/html" in content_type_lower:
+        return {
+            "response_body_kind": "html",
+            "response_body_length": len(body),
+            "response_body_preview": body[:200],
+        }
+
+    if "application/json" in content_type_lower or body.lstrip().startswith("{"):
+        parsed = sanitize_response_body(body)
+        return {
+            "response_body_kind": "json",
+            "response_body_length": len(body),
+            "response_body": parsed,
+        }
+
+    return {
+        "response_body_kind": "text",
+        "response_body_length": len(body),
+        "response_body_preview": body[:200],
+    }
+
+
+def summarize_response_headers(headers: Dict[str, str]) -> Dict[str, Any]:
+    """Summarize response headers without leaking secrets."""
+    sanitized = sanitize_headers(headers)
+    location = sanitized.get("Location") or sanitized.get("location")
+    summary: Dict[str, Any] = {
+        "response_header_keys": sorted(headers.keys()),
+        "response_headers": sanitized,
+        "sets_cookie": any(
+            key.lower() == "set-cookie" for key in headers.keys()
+        ),
+        "has_location": bool(location),
+    }
+    if location:
+        from urllib.parse import parse_qsl, urlparse
+
+        parsed = urlparse(location)
+        params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        summary["location_host"] = parsed.netloc
+        summary["location_path"] = parsed.path
+        summary["location_query_keys"] = sorted(params.keys())
+        summary["location_has_code"] = bool(params.get("code"))
+        summary["location_has_error"] = bool(params.get("error"))
+        summary["location_has_state"] = bool(params.get("state"))
+    return summary
+
+
+def format_http_exchange_log(
+    request_id: str,
+    http_method: str,
+    request_path: str,
+    query_string: str,
+    request_headers: Dict[str, str],
+    request_body: str,
+    *,
+    phase: str,
+    status_code: Optional[int] = None,
+    response_headers: Optional[Dict[str, str]] = None,
+    response_body: Optional[str] = None,
+    duration_ms: Optional[float] = None,
+    oauth_event: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Build a structured log entry for an HTTP request or response."""
+    log_data: Dict[str, Any] = {
+        "request_id": request_id,
+        "http_method": http_method,
+        "request_path": request_path,
+        "phase": phase,
+        "request_headers": sanitize_headers(request_headers),
+        **summarize_query_string(query_string),
+    }
+
+    if request_body:
+        content_type = request_headers.get("content-type", "")
+        if "application/x-www-form-urlencoded" in content_type:
+            from urllib.parse import parse_qsl
+
+            form = dict(parse_qsl(request_body, keep_blank_values=True))
+            log_data["request_body"] = {
+                key: "[REDACTED]" if key in OAUTH_QUERY_REDACT_KEYS else value
+                for key, value in form.items()
+            }
+            log_data["request_body_kind"] = "form"
+            log_data["request_body_keys"] = sorted(form.keys())
+        else:
+            log_data["request_body"] = sanitize_request_body(request_body)
+
+    if status_code is not None:
+        log_data["response_status"] = status_code
+    if response_headers is not None:
+        log_data.update(summarize_response_headers(response_headers))
+        content_type = response_headers.get("Content-Type", "")
+        if response_body is not None:
+            log_data.update(
+                summarize_response_body(response_body, content_type=content_type)
+            )
+    if duration_ms is not None:
+        log_data["duration_ms"] = round(duration_ms, 2)
+    if oauth_event:
+        log_data["oauth_event"] = oauth_event
+    if extra:
+        log_data.update(extra)
+    return log_data
+
+
 def sanitize_response_body(body: str) -> Dict[str, Any]:
     """Parse and sanitize JSON response body.
 

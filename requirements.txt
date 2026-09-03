@@ -5,3 +5,4 @@ tenacity>=8.0.0
 python-json-logger>=2.0.0
 sqlparse>=0.4.4
 aiohttp>=3.8.0
+PyJWT[crypto]>=2.13.0

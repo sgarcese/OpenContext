@@ -15,6 +15,67 @@ resource "aws_api_gateway_resource" "mcp" {
   path_part   = "mcp"
 }
 
+resource "aws_api_gateway_resource" "root_proxy" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  parent_id   = aws_api_gateway_rest_api.mcp_api.root_resource_id
+  path_part   = "{proxy+}"
+}
+
+# API Gateway Resource: /.well-known/oauth-protected-resource
+resource "aws_api_gateway_resource" "well_known" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  parent_id   = aws_api_gateway_rest_api.mcp_api.root_resource_id
+  path_part   = ".well-known"
+}
+
+resource "aws_api_gateway_resource" "oauth_protected_resource" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  parent_id   = aws_api_gateway_resource.well_known.id
+  path_part   = "oauth-protected-resource"
+}
+
+resource "aws_api_gateway_resource" "oauth_protected_resource_proxy" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  parent_id   = aws_api_gateway_resource.oauth_protected_resource.id
+  path_part   = "{proxy+}"
+}
+
+resource "aws_api_gateway_resource" "oauth2" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  parent_id   = aws_api_gateway_rest_api.mcp_api.root_resource_id
+  path_part   = "oauth2"
+}
+
+resource "aws_api_gateway_resource" "oauth2_auth" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  parent_id   = aws_api_gateway_resource.oauth2.id
+  path_part   = "auth"
+}
+
+resource "aws_api_gateway_resource" "oauth2_token" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  parent_id   = aws_api_gateway_resource.oauth2.id
+  path_part   = "token"
+}
+
+resource "aws_api_gateway_resource" "oauth2_callback" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  parent_id   = aws_api_gateway_resource.oauth2.id
+  path_part   = "callback"
+}
+
+resource "aws_api_gateway_resource" "oauth2_continue" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  parent_id   = aws_api_gateway_resource.oauth2.id
+  path_part   = "continue"
+}
+
+resource "aws_api_gateway_resource" "oauth2_register" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  parent_id   = aws_api_gateway_resource.oauth2.id
+  path_part   = "register"
+}
+
 # API Gateway Method: POST
 resource "aws_api_gateway_method" "mcp_post" {
   rest_api_id      = aws_api_gateway_rest_api.mcp_api.id
@@ -33,11 +94,200 @@ resource "aws_api_gateway_method" "mcp_options" {
   api_key_required = false
 }
 
+# API Gateway Method: GET /.well-known/oauth-protected-resource
+resource "aws_api_gateway_method" "oauth_protected_resource_get" {
+  rest_api_id      = aws_api_gateway_rest_api.mcp_api.id
+  resource_id      = aws_api_gateway_resource.oauth_protected_resource.id
+  http_method      = "GET"
+  authorization    = "NONE"
+  api_key_required = false
+}
+
+# API Gateway Method: GET /.well-known/oauth-protected-resource/{proxy+}
+resource "aws_api_gateway_method" "oauth_protected_resource_proxy_get" {
+  rest_api_id      = aws_api_gateway_rest_api.mcp_api.id
+  resource_id      = aws_api_gateway_resource.oauth_protected_resource_proxy.id
+  http_method      = "GET"
+  authorization    = "NONE"
+  api_key_required = false
+
+  request_parameters = {
+    "method.request.path.proxy" = true
+  }
+}
+
+resource "aws_api_gateway_method" "root_proxy_get" {
+  rest_api_id      = aws_api_gateway_rest_api.mcp_api.id
+  resource_id      = aws_api_gateway_resource.root_proxy.id
+  http_method      = "GET"
+  authorization    = "NONE"
+  api_key_required = false
+
+  request_parameters = {
+    "method.request.path.proxy" = true
+  }
+}
+
+resource "aws_api_gateway_method" "root_proxy_post" {
+  rest_api_id      = aws_api_gateway_rest_api.mcp_api.id
+  resource_id      = aws_api_gateway_resource.root_proxy.id
+  http_method      = "POST"
+  authorization    = "NONE"
+  api_key_required = false
+
+  request_parameters = {
+    "method.request.path.proxy" = true
+  }
+}
+
+resource "aws_api_gateway_method" "oauth2_auth_get" {
+  rest_api_id      = aws_api_gateway_rest_api.mcp_api.id
+  resource_id      = aws_api_gateway_resource.oauth2_auth.id
+  http_method      = "GET"
+  authorization    = "NONE"
+  api_key_required = false
+}
+
+resource "aws_api_gateway_method" "oauth2_token_post" {
+  rest_api_id      = aws_api_gateway_rest_api.mcp_api.id
+  resource_id      = aws_api_gateway_resource.oauth2_token.id
+  http_method      = "POST"
+  authorization    = "NONE"
+  api_key_required = false
+}
+
+resource "aws_api_gateway_method" "oauth2_callback_get" {
+  rest_api_id      = aws_api_gateway_rest_api.mcp_api.id
+  resource_id      = aws_api_gateway_resource.oauth2_callback.id
+  http_method      = "GET"
+  authorization    = "NONE"
+  api_key_required = false
+}
+
+resource "aws_api_gateway_method" "oauth2_continue_get" {
+  rest_api_id      = aws_api_gateway_rest_api.mcp_api.id
+  resource_id      = aws_api_gateway_resource.oauth2_continue.id
+  http_method      = "GET"
+  authorization    = "NONE"
+  api_key_required = false
+}
+
+resource "aws_api_gateway_method" "oauth2_register_post" {
+  rest_api_id      = aws_api_gateway_rest_api.mcp_api.id
+  resource_id      = aws_api_gateway_resource.oauth2_register.id
+  http_method      = "POST"
+  authorization    = "NONE"
+  api_key_required = false
+}
+
 # Lambda Integration for POST
 resource "aws_api_gateway_integration" "mcp_post_integration" {
   rest_api_id = aws_api_gateway_rest_api.mcp_api.id
   resource_id = aws_api_gateway_resource.mcp.id
   http_method = aws_api_gateway_method.mcp_post.http_method
+
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.mcp_server.invoke_arn
+}
+
+# Lambda Integration for OAuth protected resource metadata
+resource "aws_api_gateway_integration" "oauth_protected_resource_get_integration" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  resource_id = aws_api_gateway_resource.oauth_protected_resource.id
+  http_method = aws_api_gateway_method.oauth_protected_resource_get.http_method
+
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.mcp_server.invoke_arn
+}
+
+resource "aws_api_gateway_integration" "oauth_protected_resource_proxy_get_integration" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  resource_id = aws_api_gateway_resource.oauth_protected_resource_proxy.id
+  http_method = aws_api_gateway_method.oauth_protected_resource_proxy_get.http_method
+
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.mcp_server.invoke_arn
+
+  request_parameters = {
+    "integration.request.path.proxy" = "method.request.path.proxy"
+  }
+}
+
+resource "aws_api_gateway_integration" "root_proxy_get_integration" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  resource_id = aws_api_gateway_resource.root_proxy.id
+  http_method = aws_api_gateway_method.root_proxy_get.http_method
+
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.mcp_server.invoke_arn
+
+  request_parameters = {
+    "integration.request.path.proxy" = "method.request.path.proxy"
+  }
+}
+
+resource "aws_api_gateway_integration" "root_proxy_post_integration" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  resource_id = aws_api_gateway_resource.root_proxy.id
+  http_method = aws_api_gateway_method.root_proxy_post.http_method
+
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.mcp_server.invoke_arn
+
+  request_parameters = {
+    "integration.request.path.proxy" = "method.request.path.proxy"
+  }
+}
+
+resource "aws_api_gateway_integration" "oauth2_auth_get_integration" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  resource_id = aws_api_gateway_resource.oauth2_auth.id
+  http_method = aws_api_gateway_method.oauth2_auth_get.http_method
+
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.mcp_server.invoke_arn
+}
+
+resource "aws_api_gateway_integration" "oauth2_token_post_integration" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  resource_id = aws_api_gateway_resource.oauth2_token.id
+  http_method = aws_api_gateway_method.oauth2_token_post.http_method
+
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.mcp_server.invoke_arn
+}
+
+resource "aws_api_gateway_integration" "oauth2_callback_get_integration" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  resource_id = aws_api_gateway_resource.oauth2_callback.id
+  http_method = aws_api_gateway_method.oauth2_callback_get.http_method
+
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.mcp_server.invoke_arn
+}
+
+resource "aws_api_gateway_integration" "oauth2_continue_get_integration" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  resource_id = aws_api_gateway_resource.oauth2_continue.id
+  http_method = aws_api_gateway_method.oauth2_continue_get.http_method
+
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.mcp_server.invoke_arn
+}
+
+resource "aws_api_gateway_integration" "oauth2_register_post_integration" {
+  rest_api_id = aws_api_gateway_rest_api.mcp_api.id
+  resource_id = aws_api_gateway_resource.oauth2_register.id
+  http_method = aws_api_gateway_method.oauth2_register_post.http_method
 
   integration_http_method = "POST"
   type                    = "AWS_PROXY"
@@ -121,10 +371,37 @@ resource "aws_api_gateway_deployment" "mcp_deployment" {
   triggers = {
     redeployment = sha1(jsonencode([
       aws_api_gateway_resource.mcp.id,
+      aws_api_gateway_resource.root_proxy.id,
+      aws_api_gateway_resource.oauth_protected_resource.id,
+      aws_api_gateway_resource.oauth_protected_resource_proxy.id,
+      aws_api_gateway_resource.oauth2.id,
+      aws_api_gateway_resource.oauth2_auth.id,
+      aws_api_gateway_resource.oauth2_token.id,
+      aws_api_gateway_resource.oauth2_callback.id,
+      aws_api_gateway_resource.oauth2_continue.id,
+      aws_api_gateway_resource.oauth2_register.id,
       aws_api_gateway_method.mcp_post.id,
       aws_api_gateway_method.mcp_options.id,
+      aws_api_gateway_method.root_proxy_get.id,
+      aws_api_gateway_method.root_proxy_post.id,
+      aws_api_gateway_method.oauth_protected_resource_get.id,
+      aws_api_gateway_method.oauth_protected_resource_proxy_get.id,
+      aws_api_gateway_method.oauth2_auth_get.id,
+      aws_api_gateway_method.oauth2_token_post.id,
+      aws_api_gateway_method.oauth2_callback_get.id,
+      aws_api_gateway_method.oauth2_continue_get.id,
+      aws_api_gateway_method.oauth2_register_post.id,
       aws_api_gateway_integration.mcp_post_integration.id,
       aws_api_gateway_integration.mcp_options_integration.id,
+      aws_api_gateway_integration.root_proxy_get_integration.id,
+      aws_api_gateway_integration.root_proxy_post_integration.id,
+      aws_api_gateway_integration.oauth_protected_resource_get_integration.id,
+      aws_api_gateway_integration.oauth_protected_resource_proxy_get_integration.id,
+      aws_api_gateway_integration.oauth2_auth_get_integration.id,
+      aws_api_gateway_integration.oauth2_token_post_integration.id,
+      aws_api_gateway_integration.oauth2_callback_get_integration.id,
+      aws_api_gateway_integration.oauth2_continue_get_integration.id,
+      aws_api_gateway_integration.oauth2_register_post_integration.id,
     ]))
   }
 
@@ -135,8 +412,26 @@ resource "aws_api_gateway_deployment" "mcp_deployment" {
   depends_on = [
     aws_api_gateway_method.mcp_post,
     aws_api_gateway_method.mcp_options,
+    aws_api_gateway_method.root_proxy_get,
+    aws_api_gateway_method.root_proxy_post,
+    aws_api_gateway_method.oauth_protected_resource_get,
+    aws_api_gateway_method.oauth_protected_resource_proxy_get,
+    aws_api_gateway_method.oauth2_auth_get,
+    aws_api_gateway_method.oauth2_token_post,
+    aws_api_gateway_method.oauth2_callback_get,
+    aws_api_gateway_method.oauth2_continue_get,
+    aws_api_gateway_method.oauth2_register_post,
     aws_api_gateway_integration.mcp_post_integration,
     aws_api_gateway_integration.mcp_options_integration,
+    aws_api_gateway_integration.root_proxy_get_integration,
+    aws_api_gateway_integration.root_proxy_post_integration,
+    aws_api_gateway_integration.oauth_protected_resource_get_integration,
+    aws_api_gateway_integration.oauth_protected_resource_proxy_get_integration,
+    aws_api_gateway_integration.oauth2_auth_get_integration,
+    aws_api_gateway_integration.oauth2_token_post_integration,
+    aws_api_gateway_integration.oauth2_callback_get_integration,
+    aws_api_gateway_integration.oauth2_continue_get_integration,
+    aws_api_gateway_integration.oauth2_register_post_integration,
     aws_api_gateway_method_response.mcp_post_response_200,
     aws_api_gateway_method_response.mcp_options_response_200,
     # aws_api_gateway_integration_response.mcp_post_integration_response,  # Removed - AWS_PROXY ignores it

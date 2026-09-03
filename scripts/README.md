@@ -29,6 +29,16 @@ Deployment script that validates configuration and deploys the MCP server to AWS
 ./scripts/deploy.sh -e prod -w boston-prod-v2
 ```
 
+**OAuth credentials (staging vs prod):**
+
+Each environment has its own Strivacity tenant and confidential client. `./scripts/deploy.sh -e staging` and `-e prod` load matching values from `terraform/aws/secrets.<env>.tfvars` (gitignored; copy from `terraform/aws/secrets.tfvars.example`):
+
+- `oauth_idp_host` (e.g. `strivacity-test.boston.gov` or `home.boston.gov`)
+- `oauth_client_id`
+- `oauth_client_secret`
+
+MCP resource/callback URLs still come from that environment’s `custom_domain`. Do not commit client secrets.
+
 **What it does:**
 - Validates that exactly ONE plugin is enabled
 - Packages the code for Lambda deployment

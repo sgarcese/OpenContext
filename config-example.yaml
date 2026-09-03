@@ -68,6 +68,38 @@ aws:
   lambda_memory: 512 # Lambda memory in MB (128-10240)
   lambda_timeout: 120 # Lambda timeout in seconds (max 900)
 
+# OAuth authentication for remote MCP connectors
+# =============================================
+# Enable this when the MCP server should require bearer tokens from an OAuth
+# provider. Values can be supplied via Lambda environment variables using
+# ${ENV_VAR_NAME} placeholders.
+auth:
+  enabled: false
+  # Resource and callback URLs come from the environment tfvars custom_domain
+  # so the same config.yaml can deploy to staging or prod.
+  resource: "${OAUTH_RESOURCE}"
+  authorization_servers:
+    - "${OAUTH_AUTHORIZATION_SERVER}"
+  scopes_supported: []
+  required_scopes: []
+  jwt:
+    issuer: "${OAUTH_ISSUER}"
+    jwks_uri: "${OAUTH_JWKS_URI}"
+    audience: "${OAUTH_AUDIENCE}" # Optional; leave unset if access tokens have no aud
+    algorithms:
+      - "RS256"
+  # Validate opaque (non-JWT) access tokens via the IdP userinfo endpoint
+  userinfo_endpoint: "${OAUTH_USERINFO_ENDPOINT}"
+  oauth_proxy:
+    enabled: false
+    authorization_endpoint: "${OAUTH_AUTHORIZATION_ENDPOINT}"
+    token_endpoint: "${OAUTH_TOKEN_ENDPOINT}"
+    callback_url: "${OAUTH_CALLBACK_URL}"
+    # Confidential upstream IdP client (required for Strivacity-style clients).
+    # Claude uses PKCE against this MCP; the proxy injects these upstream.
+    client_id: "${OAUTH_CLIENT_ID}"
+    client_secret: "${OAUTH_CLIENT_SECRET}"
+
 # Logging configuration
 logging:
   level: "INFO" # Log level: DEBUG, INFO, WARNING, ERROR

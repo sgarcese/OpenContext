@@ -6,8 +6,10 @@ into the universal HTTP format expected by UniversalHTTPHandler.
 
 import asyncio
 import base64
+import inspect
 import json
 import logging
+from urllib.parse import urlencode
 from typing import Any, Dict, Optional, Protocol
 
 from server.http_handler import UniversalHTTPHandler
@@ -77,6 +79,20 @@ def lambda_handler(
                 "request_id": request_id,
                 "function_name": function_name,
                 "memory_limit": memory_limit,
+                "http_method": event.get("requestContext", {})
+                .get("http", {})
+                .get("method")
+                or event.get("httpMethod"),
+                "request_path": event.get("rawPath")
+                or event.get("requestContext", {}).get("http", {}).get("path")
+                or event.get("path"),
+                "raw_query_string_length": len(event.get("rawQueryString", "")),
+                "source_ip": event.get("requestContext", {})
+                .get("http", {})
+                .get("sourceIp")
+                or event.get("requestContext", {}).get("identity", {}).get("sourceIp"),
+                "user_agent": (event.get("headers") or {}).get("user-agent")
+                or (event.get("headers") or {}).get("User-Agent"),
             },
         )
 
@@ -91,6 +107,20 @@ def lambda_handler(
             or event.get("requestContext", {}).get("http", {}).get("path")
             or event.get("path", "/")
         )
+
+        query_string = event.get("rawQueryString", "")
+        if not query_string:
+            multi_value = event.get("multiValueQueryStringParameters")
+            if isinstance(multi_value, dict):
+                query_string = urlencode(multi_value, doseq=True)
+            elif isinstance(event.get("queryStringParameters"), dict):
+                query_string = urlencode(
+                    {
+                        key: value
+                        for key, value in event["queryStringParameters"].items()
+                        if value is not None
+                    }
+                )
 
         # Handle OPTIONS requests for CORS preflight
         if http_method == "OPTIONS":
@@ -150,6 +180,7 @@ def lambda_handler(
                     path=request_path,
                     body=body,
                     headers=headers,
+                    query_string=query_string,
                     request_id=request_id,
                 )
             finally:
@@ -158,7 +189,9 @@ def lambda_handler(
                 from server import http_handler
 
                 if http_handler._plugin_manager is not None:
-                    await http_handler._plugin_manager.shutdown()
+                    shutdown_result = http_handler._plugin_manager.shutdown()
+                    if inspect.isawaitable(shutdown_result):
+                        await shutdown_result
                     http_handler._plugin_manager = None
                     http_handler._mcp_server = None
 
@@ -177,6 +210,14 @@ def lambda_handler(
             extra={
                 "request_id": request_id,
                 "status_code": status_code,
+                "response_body_length": len(response_body or ""),
+                "response_header_keys": sorted(response_headers.keys()),
+                "response_has_location": any(
+                    key.lower() == "location" for key in response_headers
+                ),
+                "response_sets_cookie": any(
+                    key.lower() == "set-cookie" for key in response_headers
+                ),
             },
         )
 

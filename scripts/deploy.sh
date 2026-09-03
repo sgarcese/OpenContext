@@ -297,15 +297,99 @@ fi
 # Plan first - validates configuration and catches errors before any changes
 cd terraform/aws
 
+# Per-environment OAuth credentials. Staging and prod each have their own
+# Strivacity client; never reuse a leftover generic OAUTH_CLIENT_* across envs.
+ENV_KEY="$(echo "$ENVIRONMENT" | tr '[:lower:]' '[:upper:]')"
+SECRETS_FILE="secrets.${ENVIRONMENT}.tfvars"
+DOTENV_FILE="${PROJECT_ROOT}/.env.${ENVIRONMENT}"
+
+if [ -f "$DOTENV_FILE" ]; then
+    echo "Loading OAuth credentials from .env.${ENVIRONMENT}"
+    set -a
+    # shellcheck disable=SC1090
+    source "$DOTENV_FILE"
+    set +a
+fi
+
+specific_client_id_var="OAUTH_CLIENT_ID_${ENV_KEY}"
+specific_client_secret_var="OAUTH_CLIENT_SECRET_${ENV_KEY}"
+OAUTH_CLIENT_ID_RESOLVED="${!specific_client_id_var:-}"
+OAUTH_CLIENT_SECRET_RESOLVED="${!specific_client_secret_var:-}"
+
+if [ -z "$OAUTH_CLIENT_ID_RESOLVED" ] && [ -n "${OAUTH_CLIENT_ID:-}" ]; then
+    echo -e "${YELLOW}⚠️  Using generic OAUTH_CLIENT_ID for ${ENVIRONMENT}. Prefer OAUTH_CLIENT_ID_${ENV_KEY} or ${SECRETS_FILE}.${NC}"
+    OAUTH_CLIENT_ID_RESOLVED="$OAUTH_CLIENT_ID"
+fi
+if [ -z "$OAUTH_CLIENT_SECRET_RESOLVED" ] && [ -n "${OAUTH_CLIENT_SECRET:-}" ]; then
+    echo -e "${YELLOW}⚠️  Using generic OAUTH_CLIENT_SECRET for ${ENVIRONMENT}. Prefer OAUTH_CLIENT_SECRET_${ENV_KEY} or ${SECRETS_FILE}.${NC}"
+    OAUTH_CLIENT_SECRET_RESOLVED="$OAUTH_CLIENT_SECRET"
+fi
+
+TF_VAR_FILE_ARGS=("-var-file=${ENVIRONMENT}.tfvars")
+if [ -f "$SECRETS_FILE" ]; then
+    echo "Loading OAuth credentials from ${SECRETS_FILE}"
+    TF_VAR_FILE_ARGS+=("-var-file=${SECRETS_FILE}")
+fi
+
+TF_CLI_VAR_ARGS=()
+if [ -n "$OAUTH_CLIENT_ID_RESOLVED" ]; then
+    TF_CLI_VAR_ARGS+=("-var=oauth_client_id=${OAUTH_CLIENT_ID_RESOLVED}")
+fi
+if [ -n "$OAUTH_CLIENT_SECRET_RESOLVED" ]; then
+    TF_CLI_VAR_ARGS+=("-var=oauth_client_secret=${OAUTH_CLIENT_SECRET_RESOLVED}")
+fi
+
+oauth_configured=false
+if grep -Eq '^[[:space:]]*(oauth_issuer|oauth_idp_host|oauth_client_id)[[:space:]]*=' "${ENVIRONMENT}.tfvars"; then
+    oauth_configured=true
+fi
+if [ -f "$SECRETS_FILE" ] && grep -Eq '^[[:space:]]*(oauth_issuer|oauth_idp_host|oauth_client_id)[[:space:]]*=' "$SECRETS_FILE"; then
+    oauth_configured=true
+fi
+has_oauth_secret=false
+if [ -n "$OAUTH_CLIENT_SECRET_RESOLVED" ]; then
+    has_oauth_secret=true
+fi
+if [ -f "$SECRETS_FILE" ] && grep -Eq '^[[:space:]]*oauth_client_secret[[:space:]]*=' "$SECRETS_FILE"; then
+    has_oauth_secret=true
+fi
+if [ "$oauth_configured" = true ] && [ "$has_oauth_secret" = false ]; then
+    echo -e "${RED}❌ OAuth is configured for ${ENVIRONMENT} but no client secret was found.${NC}"
+    echo "Create terraform/aws/${SECRETS_FILE} from terraform/aws/secrets.tfvars.example"
+    echo "or export ${specific_client_secret_var}."
+    exit 1
+fi
+
+# Optional OIDC metadata overrides. Environment tfvars are the source of truth;
+# only export when the operator explicitly set a value so empty TF_VAR_* cannot
+# clobber staging vs prod endpoints.
+export TF_VAR_oauth_issuer="${TF_VAR_oauth_issuer:-${OAUTH_ISSUER:-}}"
+export TF_VAR_oauth_jwks_uri="${TF_VAR_oauth_jwks_uri:-${OAUTH_JWKS_URI:-}}"
+export TF_VAR_oauth_audience="${TF_VAR_oauth_audience:-${OAUTH_AUDIENCE:-}}"
+export TF_VAR_oauth_authorization_endpoint="${TF_VAR_oauth_authorization_endpoint:-${OAUTH_AUTHORIZATION_ENDPOINT:-}}"
+export TF_VAR_oauth_token_endpoint="${TF_VAR_oauth_token_endpoint:-${OAUTH_TOKEN_ENDPOINT:-}}"
+export TF_VAR_oauth_userinfo_endpoint="${TF_VAR_oauth_userinfo_endpoint:-${OAUTH_USERINFO_ENDPOINT:-}}"
+if [ -z "${TF_VAR_oauth_issuer:-}" ]; then unset TF_VAR_oauth_issuer; fi
+if [ -z "${TF_VAR_oauth_jwks_uri:-}" ]; then unset TF_VAR_oauth_jwks_uri; fi
+if [ -z "${TF_VAR_oauth_audience:-}" ]; then unset TF_VAR_oauth_audience; fi
+if [ -z "${TF_VAR_oauth_authorization_endpoint:-}" ]; then unset TF_VAR_oauth_authorization_endpoint; fi
+if [ -z "${TF_VAR_oauth_token_endpoint:-}" ]; then unset TF_VAR_oauth_token_endpoint; fi
+if [ -z "${TF_VAR_oauth_userinfo_endpoint:-}" ]; then unset TF_VAR_oauth_userinfo_endpoint; fi
+
 echo "Selecting Terraform workspace: ${TF_WORKSPACE}"
 terraform workspace select "$TF_WORKSPACE" 2>/dev/null || terraform workspace new "$TF_WORKSPACE"
 
 echo -e "${YELLOW}📋 Planning Terraform changes...${NC}"
-if ! terraform plan \
-    -out=tfplan \
-    -var-file="${ENVIRONMENT}.tfvars" \
-    -var="aws_region=$AWS_REGION" \
-    -var="config_file=config.yaml"; then
+PLAN_ARGS=(
+    -out=tfplan
+    "${TF_VAR_FILE_ARGS[@]}"
+    -var="aws_region=$AWS_REGION"
+    -var="config_file=config.yaml"
+)
+if [ ${#TF_CLI_VAR_ARGS[@]} -gt 0 ]; then
+    PLAN_ARGS+=("${TF_CLI_VAR_ARGS[@]}")
+fi
+if ! terraform plan "${PLAN_ARGS[@]}"; then
     echo -e "${RED}❌ Terraform plan failed - aborting deployment${NC}"
     exit 1
 fi

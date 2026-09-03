@@ -228,3 +228,8 @@ client/opencontext-client-*
 # Config yaml
 config.yaml
 examples/
+
+# Per-environment OAuth client credentials (never commit)
+terraform/aws/secrets.*.tfvars
+.env.staging
+.env.prod

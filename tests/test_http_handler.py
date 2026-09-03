@@ -11,6 +11,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from server.http_handler import UniversalHTTPHandler, _initialize_server, _load_config
 from core.validators import ConfigurationError
+from server.auth import AuthResult
+
+
+@pytest.fixture(autouse=True)
+def disable_auth_by_default():
+    """Keep legacy handler tests focused on HTTP behavior, not auth config."""
+    import server.http_handler
+
+    previous_config = server.http_handler._config
+    server.http_handler._config = {
+        "plugins": {"ckan": {"enabled": True}},
+        "auth": {"enabled": False},
+    }
+    yield
+    server.http_handler._config = previous_config
 
 
 class TestPathValidation:
@@ -195,8 +210,8 @@ class TestCORS:
             )
 
             assert headers["Access-Control-Allow-Origin"] == "*"
-            assert headers["Access-Control-Allow-Methods"] == "POST, OPTIONS"
-            assert headers["Access-Control-Allow-Headers"] == "content-type"
+            assert headers["Access-Control-Allow-Methods"] == "GET, POST, OPTIONS"
+            assert headers["Access-Control-Allow-Headers"] == "authorization, content-type"
 
     def test_handle_options_returns_cors_headers(self):
         """Test that OPTIONS handler returns CORS headers."""
@@ -206,10 +221,164 @@ class TestCORS:
 
         assert status == 200
         assert headers["Access-Control-Allow-Origin"] == "*"
-        assert headers["Access-Control-Allow-Methods"] == "POST, OPTIONS"
-        assert headers["Access-Control-Allow-Headers"] == "content-type"
+        assert headers["Access-Control-Allow-Methods"] == "GET, POST, OPTIONS"
+        assert headers["Access-Control-Allow-Headers"] == "authorization, content-type"
         assert headers["Access-Control-Max-Age"] == "86400"
         assert body == ""
+
+
+class TestOAuthAuth:
+    """Test OAuth discovery and bearer-token enforcement."""
+
+    auth_config = {
+        "plugins": {"ckan": {"enabled": True}},
+        "auth": {
+            "enabled": True,
+            "resource": "https://data-mcp-staging.boston.gov/mcp",
+            "authorization_servers": ["https://auth.example.gov"],
+            "scopes_supported": ["openid", "profile"],
+            "required_scopes": ["openid"],
+            "jwt": {
+                "issuer": "https://auth.example.gov",
+                "jwks_uri": "https://auth.example.gov/.well-known/jwks.json",
+                "audience": "https://data-mcp-staging.boston.gov/mcp",
+            },
+        },
+    }
+
+    @pytest.mark.asyncio
+    async def test_protected_resource_metadata_endpoint(self):
+        handler = UniversalHTTPHandler()
+
+        with patch("server.http_handler._load_config", return_value=self.auth_config):
+            status, headers, body = await handler.handle_request(
+                method="GET",
+                path="/.well-known/oauth-protected-resource/mcp",
+                body="",
+                headers={},
+                request_id="test-request-id",
+            )
+
+        assert status == 200
+        assert headers["Content-Type"] == "application/json"
+        metadata = json.loads(body)
+        assert metadata["resource"] == "https://data-mcp-staging.boston.gov/mcp"
+        assert metadata["authorization_servers"] == ["https://auth.example.gov"]
+
+    @pytest.mark.asyncio
+    async def test_mcp_without_bearer_token_returns_www_authenticate(self):
+        handler = UniversalHTTPHandler()
+
+        with patch("server.http_handler._load_config", return_value=self.auth_config):
+            status, headers, body = await handler.handle_request(
+                method="POST",
+                path="/mcp",
+                body=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+                headers={},
+                request_id="test-request-id",
+            )
+
+        assert status == 401
+        assert "www-authenticate" in headers
+        assert (
+            'resource_metadata="https://data-mcp-staging.boston.gov'
+            '/.well-known/oauth-protected-resource/mcp"'
+            in headers["www-authenticate"]
+        )
+        assert json.loads(body)["error"] == "unauthorized"
+
+    @pytest.mark.asyncio
+    async def test_oauth_authorize_redirects_to_upstream_with_proxy_callback(self):
+        handler = UniversalHTTPHandler()
+        proxy_config = {
+            "plugins": {"ckan": {"enabled": True}},
+            "auth": {
+                "enabled": True,
+                "resource": "https://data-mcp-staging.boston.gov/mcp",
+                "authorization_servers": ["https://data-mcp-staging.boston.gov"],
+                "scopes_supported": ["openid"],
+                "required_scopes": ["openid"],
+                "jwt": {
+                    "issuer": "https://strivacity-test.boston.gov/",
+                    "jwks_uri": "https://strivacity-test.boston.gov/.well-known/jwks.json",
+                },
+                "oauth_proxy": {
+                    "enabled": True,
+                    "authorization_endpoint": "https://strivacity-test.boston.gov/oauth2/auth",
+                    "token_endpoint": "https://strivacity-test.boston.gov/oauth2/token",
+                    "callback_url": "https://data-mcp-staging.boston.gov/oauth2/callback",
+                    "client_id": "7dd7654fc96c4fe5a18e91daaaf54b0b",
+                },
+            },
+        }
+        query = (
+            "response_type=code"
+            "&client_id=claude-client"
+            "&redirect_uri=https%3A%2F%2Fclaude.ai%2Fapi%2Fmcp%2Fauth_callback"
+            "&code_challenge=challenge"
+            "&code_challenge_method=S256"
+            "&state=claude-state"
+            "&scope=openid"
+            "&resource=https%3A%2F%2Fdata-mcp-staging.boston.gov%2Fmcp"
+        )
+
+        with (
+            patch("server.http_handler._load_config", return_value=proxy_config),
+            patch("server.auth.persist_authorization_pending"),
+        ):
+            status, headers, body = await handler.handle_request(
+                method="GET",
+                path="/oauth2/auth",
+                body="",
+                headers={"accept": "text/html", "user-agent": "Mozilla/5.0"},
+                request_id="test-request-id",
+                query_string=query,
+            )
+
+        assert status == 302
+        location = headers["Location"]
+        assert location.startswith("https://strivacity-test.boston.gov/oauth2/auth?")
+        assert (
+            "redirect_uri=https%3A%2F%2Fdata-mcp-staging.boston.gov%2Foauth2%2Fcallback"
+            in location
+        )
+        assert "client_id=7dd7654fc96c4fe5a18e91daaaf54b0b" in location
+        assert "claude.ai" not in location
+        assert "Set-Cookie" in headers
+        assert body == ""
+
+    @pytest.mark.asyncio
+    async def test_mcp_with_valid_bearer_token_succeeds(self):
+        handler = UniversalHTTPHandler()
+
+        with (
+            patch("server.http_handler._load_config", return_value=self.auth_config),
+            patch(
+                "server.http_handler.validate_bearer_token",
+                new=AsyncMock(return_value=AuthResult(valid=True)),
+            ) as mock_validate,
+            patch("server.http_handler._initialize_server"),
+            patch("server.http_handler._mcp_server") as mock_mcp_server,
+        ):
+            mock_mcp_server.handle_http_request = AsyncMock(
+                return_value={
+                    "statusCode": 200,
+                    "headers": {},
+                    "body": json.dumps({"result": "success"}),
+                }
+            )
+
+            status, headers, body = await handler.handle_request(
+                method="POST",
+                path="/mcp",
+                body=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+                headers={"authorization": "Bearer test-token"},
+                request_id="test-request-id",
+            )
+
+        assert status == 200
+        assert json.loads(body)["result"] == "success"
+        mock_validate.assert_awaited_once()
 
 
 class TestSessionID:
