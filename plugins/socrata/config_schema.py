@@ -21,7 +21,18 @@ class SocrataPluginConfig(BasePluginConfig):
         ..., description="Public portal URL (e.g., https://data.example.gov)"
     )
     app_token: str = Field(
-        ..., description="Socrata app token (required for SODA3 API)"
+        ...,
+        description=(
+            "Socrata App Token (required for SODA3 API). Must be an App "
+            "Token from Developer Settings -> App Tokens (or "
+            "dev.socrata.com/register) — sent bare as the X-App-Token "
+            "header. Do NOT use the Key ID from an API Key pair (Developer "
+            "Settings -> API Keys): that credential type is for HTTP Basic "
+            "Auth on authenticated requests, which this plugin does not "
+            "implement, and a bare Key ID fails with 'Invalid app_token "
+            "specified' (403) on query_dataset while search_datasets/"
+            "get_dataset appear to keep working."
+        ),
     )
 
     @field_validator("app_token")
@@ -30,7 +41,9 @@ class SocrataPluginConfig(BasePluginConfig):
         """Validate that app token is non-empty."""
         if not v or not v.strip():
             raise ValueError(
-                "Socrata requires a free app token. Register at https://dev.socrata.com/register"
+                "Socrata requires a free App Token (not an API Key ID) from "
+                "Developer Settings -> App Tokens, or "
+                "https://dev.socrata.com/register"
             )
         return v.strip()
 
