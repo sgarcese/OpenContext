@@ -21,8 +21,10 @@ plugins:
 
 ### Tools
 
-- `ckan__search_datasets(query, limit)` - Search for datasets
-- `ckan__get_dataset(dataset_id)` - Get dataset metadata
+- `ckan__search_datasets(query, limit)` - Free-text search; header reports the catalog-wide match count
+- `ckan__list_datasets(query, organization, tag, format, license, group, sort, limit, offset)` - Browse the catalog with exact-match filters, sorting (default: most recently modified first) and paging; returns the total count plus organization, modified date, resource count and formats per dataset
+- `ckan__get_catalog_stats(facets, query, organization, tag, format, license, group, limit)` - Count public datasets overall and per organization / tag / resource format / license / group (from the portal search index); values it returns are the exact filter values `list_datasets` accepts
+- `ckan__get_dataset(dataset_id, max_resources)` - Full dataset metadata: organization (title + slug), license, created/modified dates, tags, groups, and every resource with ID, format, created/modified dates, size, DataStore flag, download URL and description. Datasets split by year expose one resource per year, so resource names/dates/URLs date each slice. `max_resources` defaults to 50 (max 500)
 - `ckan__query_data(resource_id, filters, limit)` - Query data from a resource
 - `ckan__get_schema(resource_id)` - Get schema for a resource
 - `ckan__execute_sql(sql)` - Execute a validated `SELECT` query against the datastore
@@ -33,6 +35,11 @@ plugins:
 - `having` keys are aggregate expressions or declared metric aliases; string values may carry a comparison operator (`{"count(*)": ">= 5"}`), bare numbers default to `>`
 - `order_by` accepts `"field"`, `"-field"` (descending), or `"field ASC|DESC"`
 - All identifiers and expressions are validated against safe whitelists before SQL is built
+
+**Catalog browsing notes:**
+- `list_datasets` / `get_catalog_stats` filters are exact matches on CKAN's search index (Solr). Filter names are whitelisted and values are quoted/escaped as Solr phrases, so operators and wildcards in values are inert
+- Resource download URLs are shown verbatim only when their host is the portal's own host (or a subdomain); other hosts render as `(external: hostname)`
+- Counts cover public datasets only (private/draft datasets are not in the search index)
 
 ### Examples
 
@@ -64,7 +71,9 @@ See [CKAN API documentation](https://docs.ckan.org/en/latest/api/) for details.
 
 For Socrata-based open data portals (e.g., data.cityofchicago.org, data.cityofnewyork.us, data.seattle.gov).
 
-**Note:** Socrata requires a free app token. Register at [https://dev.socrata.com/register](https://dev.socrata.com/register).
+**Note:** Socrata requires a free App Token. Register at [https://dev.socrata.com/register](https://dev.socrata.com/register), or generate one from a portal's *Developer Settings → App Tokens*.
+
+**Careful — App Token vs. API Key:** Socrata's developer console also offers a separate "API Key" credential (*Developer Settings → API Keys*), which issues a **Key ID + Key Secret pair** for HTTP Basic Auth on authenticated requests (writes, private datasets). This plugin does not implement Basic Auth — it sends `app_token` bare as the `X-App-Token` header, so only a real App Token works here. Pasting an API Key's Key ID in as `app_token` fails silently for some tools and not others: `search_datasets`/`get_dataset` keep working, but `query_dataset` fails with `"Invalid app_token specified"` (HTTP 403) on the `/resource/{id}.json` endpoint. No secret/private key is needed for public open-data portals — the bare App Token is sufficient.
 
 ### Configuration
 
@@ -81,8 +90,8 @@ plugins:
 
 ### Tools
 
-- `socrata__search_datasets(query, limit)` - Search for datasets in the portal catalog
-- `socrata__get_dataset(dataset_id)` - Get full metadata for a dataset (4x4 ID)
+- `socrata__search_datasets(query, limit)` - Search for datasets in the portal catalog; header reports the catalog-wide match count
+- `socrata__get_dataset(dataset_id)` - Full metadata for a dataset (4x4 ID): source/attribution, license, created/published/modified dates, row and column counts, downloads/views, category, tags
 - `socrata__get_schema(dataset_id)` - Get column schema for constructing SoQL queries
 - `socrata__query_dataset(dataset_id, soql_query)` - Query data using SoQL
 - `socrata__execute_sql(dataset_id, soql)` - Execute raw SoQL query (advanced, similar to CKAN execute_sql)
@@ -144,7 +153,7 @@ plugins:
 ### Tools
 
 - `arcgis__search_datasets(query, limit)` - Search the Hub catalog (query required)
-- `arcgis__get_dataset(dataset_id)` - Get Hub item metadata
+- `arcgis__get_dataset(dataset_id)` - Hub item metadata: owner/organization, created/modified/last-edit dates, record count, size, license, categories, type keywords, item and service URLs (host-gated)
 - `arcgis__get_aggregations(field, query)` - Aggregate counts for a field
 - `arcgis__get_schema(dataset_id)` - Get Feature Service layer schema
 - `arcgis__query_data(dataset_id, where, out_fields, limit)` - Query records (limit max 1000)
@@ -179,7 +188,7 @@ plugins:
 ### Tools
 
 - `opendatasoft__search_datasets(query, limit)` - Search the portal catalog (full-text via ODSQL `search()`)
-- `opendatasoft__get_dataset(dataset_id)` - Get dataset metadata (title, description, theme, keywords, record count)
+- `opendatasoft__get_dataset(dataset_id)` - Dataset metadata: publisher, license, attribution, modified/data-processed dates, record and field counts, theme, keywords, references
 - `opendatasoft__get_schema(dataset_id)` - Get field names, types and descriptions for ODSQL clauses
 - `opendatasoft__query_data(dataset_id, where, select, order_by, limit)` - Query records with ODSQL (limit capped at 100)
 - `opendatasoft__aggregate_data(dataset_id, metrics, group_by, where, order_by, limit)` - Aggregate records with GROUP BY

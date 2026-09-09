@@ -11,7 +11,7 @@ import httpx
 
 from core.base_plugin import BaseOpenDataPlugin, HTTP_RETRY, ToolHandler
 from core.interfaces import PluginType, ToolDefinition, ToolResult
-from core.portal_content import join_cleaned
+from core.portal_content import clean_text, join_cleaned
 from plugins.ckan.config_schema import CKANPluginConfig
 from plugins.ckan.sql_validator import SQLValidator
 
@@ -33,6 +33,100 @@ _SAFE_HAVING_VALUE = re.compile(r"^\s*(=|!=|<>|>=|<=|>|<)?\s*-?\d+(\.\d+)?\s*$")
 
 # ORDER BY accepts "field", "-field" (descending), or "field ASC|DESC".
 _ORDER_BY_DIRECTION = re.compile(r"^(asc|desc)$", re.IGNORECASE)
+
+
+# Catalog browse/facet vocabulary. Tool arguments on the left are the only
+# filter names accepted; they map to CKAN's Solr index fields on the right.
+_CATALOG_FILTER_FIELDS: Dict[str, str] = {
+    "organization": "organization",
+    "tag": "tags",
+    "format": "res_format",
+    "license": "license_id",
+    "group": "groups",
+}
+_FACET_FIELDS: tuple = ("organization", "tags", "res_format", "license_id", "groups")
+_FACET_LABELS: Dict[str, str] = {
+    "organization": "Organization",
+    "tags": "Tags",
+    "res_format": "Resource format",
+    "license_id": "License",
+    "groups": "Groups",
+}
+# Sort options exposed to the model -> the sort string actually sent.
+_SORT_OPTIONS: Dict[str, str] = {
+    "relevance": "score desc, metadata_modified desc",
+    "metadata_modified desc": "metadata_modified desc",
+    "metadata_modified asc": "metadata_modified asc",
+    "name asc": "name asc",
+    "title asc": "title_string asc",
+}
+_MAX_FILTER_VALUE_LEN = 200
+_MAX_LIST_LIMIT = 100
+_MAX_FACET_LIMIT = 100
+_MAX_RESOURCES = 500
+_DEFAULT_MAX_RESOURCES = 50
+
+# Shared JSON-schema fragment for the exact-match catalog filters.
+_CATALOG_FILTER_SCHEMA: Dict[str, Any] = {
+    "organization": {
+        "type": "string",
+        "description": "Exact organization slug (e.g. boston-311-org); "
+        "get slugs from get_catalog_stats",
+    },
+    "tag": {"type": "string", "description": "Exact tag name"},
+    "format": {
+        "type": "string",
+        "description": "Exact resource format (e.g. CSV, GeoJSON)",
+    },
+    "license": {"type": "string", "description": "Exact license id (e.g. odc-pddl)"},
+    "group": {"type": "string", "description": "Exact group name"},
+}
+
+
+def _escape_solr_phrase(value: str) -> str:
+    """Quote ``value`` as a Solr phrase.
+
+    Inside a double-quoted Solr phrase only ``\\`` and ``"`` are
+    metacharacters, so escaping those two is sufficient to make operators
+    (``AND``, ``*``, ``:``, parentheses) inert.
+    """
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _build_fq(filters: Dict[str, Any]) -> str:
+    """Build a CKAN/Solr ``fq`` string from whitelisted exact-match filters.
+
+    Args:
+        filters: Mapping of tool argument name (``organization``, ``tag``,
+            ``format``, ``license``, ``group``) to value.
+
+    Returns:
+        ``field:"value" AND field:"value"`` or ``""`` when nothing applies.
+
+    Raises:
+        ValueError: If a filter name is not whitelisted.
+    """
+    clauses: List[str] = []
+    for key, raw in (filters or {}).items():
+        if key not in _CATALOG_FILTER_FIELDS:
+            raise ValueError(f"Unknown filter: {key!r}")
+        if raw is None:
+            continue
+        value = clean_text(raw, max_len=_MAX_FILTER_VALUE_LEN, single_line=True)
+        if not value:
+            continue
+        clauses.append(f"{_CATALOG_FILTER_FIELDS[key]}:{_escape_solr_phrase(value)}")
+    return " AND ".join(clauses)
+
+
+def _clamp(value: Any, default: int, lo: int, hi: int) -> int:
+    """Coerce ``value`` to an int within ``[lo, hi]``, falling back to ``default``."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        n = default
+    return max(lo, min(hi, n))
 
 
 def _validate_identifier(name: str) -> None:
@@ -202,7 +296,13 @@ class CKANPlugin(BaseOpenDataPlugin):
             ),
             ToolDefinition(
                 name="get_dataset",
-                description=f"Get detailed information about a specific dataset from {self.plugin_config.city_name}'s open data portal",
+                description=(
+                    f"Get detailed information about a specific dataset from "
+                    f"{self.plugin_config.city_name}'s open data portal: "
+                    "organization, license, created/modified dates, tags, groups, "
+                    "and every resource with its ID, format, dates, size, "
+                    "DataStore flag, and download URL."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -210,8 +310,94 @@ class CKANPlugin(BaseOpenDataPlugin):
                             "type": "string",
                             "description": "Dataset ID or name",
                         },
+                        "max_resources": {
+                            "type": "integer",
+                            "description": (
+                                "Maximum resources to list (default "
+                                f"{_DEFAULT_MAX_RESOURCES}, max {_MAX_RESOURCES}). "
+                                "Increase for datasets split into one resource per year."
+                            ),
+                            "default": _DEFAULT_MAX_RESOURCES,
+                            "minimum": 1,
+                            "maximum": _MAX_RESOURCES,
+                        },
                     },
                     "required": ["dataset_id"],
+                },
+            ),
+            ToolDefinition(
+                name="list_datasets",
+                description=(
+                    f"Browse {self.plugin_config.city_name}'s open data catalog with "
+                    "exact-match filters (organization, tag, format, license, group), "
+                    "sorting (default: most recently modified first), and paging. "
+                    "Returns the total matching count plus a page of datasets with "
+                    "organization, modified date, resource count and formats. Use "
+                    "search_datasets for free-text relevance search; use this to "
+                    "list everything from an organization or find what changed recently."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Optional free-text query (omit to browse the whole catalog)",
+                        },
+                        **_CATALOG_FILTER_SCHEMA,
+                        "sort": {
+                            "type": "string",
+                            "enum": list(_SORT_OPTIONS),
+                            "default": "metadata_modified desc",
+                            "description": "Sort order",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": f"Datasets per page (default 20, max {_MAX_LIST_LIMIT})",
+                            "default": 20,
+                            "minimum": 1,
+                            "maximum": _MAX_LIST_LIMIT,
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Number of datasets to skip (for paging)",
+                            "default": 0,
+                            "minimum": 0,
+                        },
+                    },
+                },
+            ),
+            ToolDefinition(
+                name="get_catalog_stats",
+                description=(
+                    f"Count datasets in {self.plugin_config.city_name}'s open data "
+                    "portal, overall and broken down by organization, tag, resource "
+                    "format, license, or group. Counts come from the portal's search "
+                    "index and cover public datasets only. Optionally scope the counts "
+                    "with a free-text query and/or the same exact-match filters as "
+                    "list_datasets. Use this for catalog-wide statistics instead of "
+                    "estimating from search results."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "facets": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": list(_FACET_FIELDS)},
+                            "description": "Facets to count (default: all)",
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Optional free-text query to scope the counts",
+                        },
+                        **_CATALOG_FILTER_SCHEMA,
+                        "limit": {
+                            "type": "integer",
+                            "description": f"Max values per facet (default 20, max {_MAX_FACET_LIMIT})",
+                            "default": 20,
+                            "minimum": 1,
+                            "maximum": _MAX_FACET_LIMIT,
+                        },
+                    },
                 },
             ),
             ToolDefinition(
@@ -324,7 +510,8 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
                 guidance=(
                     f"View all datasets at: {self.plugin_config.portal_url}\n"
                     "Use the get_dataset tool with a dataset ID from the list "
-                    "to get details and resource IDs."
+                    "to get details and resource IDs. Use list_datasets to "
+                    "filter/sort/page the catalog and get_catalog_stats for counts."
                 ),
             ),
             "get_dataset": ToolHandler(
@@ -332,7 +519,25 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
                 required_args=("dataset_id",),
                 guidance=(
                     "Use the get_schema or query_data tool with a Resource ID "
-                    "from the list above to inspect or query its data."
+                    "from the list above to inspect or query its data. Resource "
+                    "names and URLs usually carry the year for datasets split by "
+                    "year; pass max_resources to see more resources."
+                ),
+            ),
+            "list_datasets": ToolHandler(
+                handler=self._tool_list_datasets,
+                guidance=(
+                    "Use get_catalog_stats for the exact organization/tag/format/"
+                    "license/group values accepted by the filters, and get_dataset "
+                    "with an ID for resources."
+                ),
+            ),
+            "get_catalog_stats": ToolHandler(
+                handler=self._tool_get_catalog_stats,
+                guidance=(
+                    "Pass a value shown in parentheses to list_datasets "
+                    "(organization=, tag=, format=, license=, group=) to browse "
+                    "that slice of the catalog."
                 ),
             ),
             "query_data": ToolHandler(
@@ -356,12 +561,15 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
     async def _tool_search_datasets(self, arguments: Dict[str, Any]) -> ToolResult:
         query = arguments.get("query", "")
         limit = arguments.get("limit", 20)
-        datasets = await self.search_datasets(query, limit)
+        result = await self._package_search({"q": query, "rows": limit})
+        datasets = result.get("results", []) or []
         return ToolResult(
             content=[
                 {
                     "type": "text",
-                    "text": self._format_search_results(datasets),
+                    "text": self._format_search_results(
+                        datasets, total=result.get("count")
+                    ),
                 }
             ],
             success=True,
@@ -369,11 +577,78 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
 
     async def _tool_get_dataset(self, arguments: Dict[str, Any]) -> ToolResult:
         dataset = await self.get_dataset(arguments["dataset_id"])
+        max_resources = _clamp(
+            arguments.get("max_resources"), _DEFAULT_MAX_RESOURCES, 1, _MAX_RESOURCES
+        )
         return ToolResult(
             content=[
                 {
                     "type": "text",
-                    "text": self._format_dataset(dataset),
+                    "text": self._format_dataset(dataset, max_resources=max_resources),
+                }
+            ],
+            success=True,
+        )
+
+    @staticmethod
+    def _catalog_filters(arguments: Dict[str, Any]) -> Dict[str, Any]:
+        """Pick the whitelisted catalog filter arguments out of ``arguments``."""
+        return {k: arguments.get(k) for k in _CATALOG_FILTER_FIELDS if arguments.get(k)}
+
+    async def _tool_list_datasets(self, arguments: Dict[str, Any]) -> ToolResult:
+        sort = arguments.get("sort") or "metadata_modified desc"
+        if sort not in _SORT_OPTIONS:
+            raise ValueError(
+                f"Invalid sort {sort!r}; choose one of: {', '.join(_SORT_OPTIONS)}"
+            )
+        limit = _clamp(arguments.get("limit"), 20, 1, _MAX_LIST_LIMIT)
+        offset = _clamp(arguments.get("offset"), 0, 0, 10_000_000)
+        query = (arguments.get("query") or "").strip()
+        params: Dict[str, Any] = {
+            "q": query or "*:*",
+            "rows": limit,
+            "start": offset,
+            "sort": _SORT_OPTIONS[sort],
+        }
+        fq = _build_fq(self._catalog_filters(arguments))
+        if fq:
+            params["fq"] = fq
+        result = await self._package_search(params)
+        datasets = result.get("results", []) or []
+        return ToolResult(
+            content=[
+                {
+                    "type": "text",
+                    "text": self._format_search_results(
+                        datasets, total=result.get("count"), offset=offset
+                    ),
+                }
+            ],
+            success=True,
+        )
+
+    async def _tool_get_catalog_stats(self, arguments: Dict[str, Any]) -> ToolResult:
+        facets = arguments.get("facets") or list(_FACET_FIELDS)
+        if isinstance(facets, str):
+            facets = [facets]
+        for facet in facets:
+            if facet not in _FACET_FIELDS:
+                raise ValueError(
+                    f"Unknown facet {facet!r}; choose from: {', '.join(_FACET_FIELDS)}"
+                )
+        limit = _clamp(arguments.get("limit"), 20, 1, _MAX_FACET_LIMIT)
+        query = (arguments.get("query") or "").strip()
+        filters = self._catalog_filters(arguments)
+        stats = await self.get_catalog_stats(
+            list(facets), query=query, filters=filters, limit=limit
+        )
+        return ToolResult(
+            content=[
+                {
+                    "type": "text",
+                    "text": self._format_catalog_stats(
+                        stats["count"], stats["facets"], query=query, filters=filters
+                    ),
                 }
             ],
             success=True,
@@ -440,9 +715,7 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
         formatted = self._format_sql_results(
             result.get("records", []), result.get("fields", [])
         )
-        return ToolResult(
-            content=[{"type": "text", "text": formatted}], success=True
-        )
+        return ToolResult(content=[{"type": "text", "text": formatted}], success=True)
 
     async def search_datasets(
         self, query: str, limit: int = 20
@@ -456,10 +729,91 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
         Returns:
             List of dataset metadata dictionaries
         """
-        response = await self._call_ckan_api(
-            "package_search", {"q": query, "rows": limit}
-        )
-        return response.get("result", {}).get("results", [])
+        result = await self._package_search({"q": query, "rows": limit})
+        return result.get("results", []) or []
+
+    async def _package_search(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """POST ``package_search`` and return the full ``result`` envelope.
+
+        The envelope carries ``count`` (catalog-wide total), ``results``,
+        ``search_facets`` and legacy ``facets``. ``fl`` must not be used:
+        it collapses ``organization`` to a slug and drops ``resources``.
+        """
+        response = await self._call_ckan_api("package_search", params)
+        return response.get("result", {}) or {}
+
+    async def get_catalog_stats(
+        self,
+        facets: List[str],
+        *,
+        query: str = "",
+        filters: Optional[Dict[str, Any]] = None,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """Count datasets overall and per facet value via ``package_search``.
+
+        Args:
+            facets: Facet fields to count (subset of ``_FACET_FIELDS``).
+            query: Optional free-text query scoping the counts.
+            filters: Optional whitelisted exact-match filters (see ``_build_fq``).
+            limit: Maximum values returned per facet.
+
+        Returns:
+            ``{"count": int, "facets": {field: [{"name", "display_name", "count"}]}}``
+            with each facet's values sorted by count descending.
+        """
+        for facet in facets:
+            if facet not in _FACET_FIELDS:
+                raise ValueError(f"Unknown facet {facet!r}")
+        params: Dict[str, Any] = {
+            "q": query or "*:*",
+            "rows": 0,
+            "facet": True,
+            "facet.field": list(facets),
+            "facet.limit": limit,
+        }
+        fq = _build_fq(filters or {})
+        if fq:
+            params["fq"] = fq
+        result = await self._package_search(params)
+
+        search_facets = result.get("search_facets") or {}
+        legacy_facets = result.get("facets") or {}
+        out: Dict[str, List[Dict[str, Any]]] = {}
+        for facet in facets:
+            items: List[Dict[str, Any]] = []
+            block = search_facets.get(facet)
+            if isinstance(block, dict) and isinstance(block.get("items"), list):
+                for item in block["items"]:
+                    if not isinstance(item, dict):
+                        continue
+                    items.append(
+                        {
+                            "name": item.get("name", ""),
+                            "display_name": item.get("display_name")
+                            or item.get("name", ""),
+                            "count": self._as_int(item.get("count")),
+                        }
+                    )
+            elif isinstance(legacy_facets.get(facet), dict):
+                for name, count in legacy_facets[facet].items():
+                    items.append(
+                        {
+                            "name": name,
+                            "display_name": name,
+                            "count": self._as_int(count),
+                        }
+                    )
+            items.sort(key=lambda i: (-i["count"], str(i["name"])))
+            out[facet] = items
+        return {"count": self._as_int(result.get("count")), "facets": out}
+
+    @staticmethod
+    def _as_int(value: Any) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return 0
 
     async def get_dataset(self, dataset_id: str) -> Dict[str, Any]:
         """Get detailed metadata for a specific dataset.
@@ -682,24 +1036,71 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
             logger.error(f"Health check failed: {e}")
             return False
 
-    def _format_search_results(self, datasets: List[Dict[str, Any]]) -> str:
-        """Format search results for user display."""
+    def _format_search_results(
+        self,
+        datasets: List[Dict[str, Any]],
+        *,
+        total: Optional[int] = None,
+        offset: int = 0,
+    ) -> str:
+        """Format search/list results for user display.
+
+        Args:
+            datasets: Page of ``package_search`` hits.
+            total: Catalog-wide hit count from the API (``None`` if unknown).
+            offset: Paging offset, used in the header.
+        """
         if not datasets:
+            if isinstance(total, int) and total > 0 and offset:
+                return (
+                    f"No datasets on this page (offset {offset} of {total} matching "
+                    f"dataset(s) in {self.plugin_config.city_name}'s open data portal)."
+                )
             return f"No datasets found in {self.plugin_config.city_name}'s open data portal."
 
-        lines = [
-            f"Found {len(datasets)} dataset(s) in {self.plugin_config.city_name}'s open data portal:\n"
-        ]
+        lines = [self.format_search_header(total, len(datasets), offset=offset), ""]
 
-        for i, dataset in enumerate(datasets, 1):
+        for i, dataset in enumerate(datasets, offset + 1):
             title = self.portal_line(dataset.get("title"), default="Untitled")
             dataset_id = self.safe_id(dataset.get("id"))
+            name = self.safe_id(dataset.get("name"), default="")
             notes = self.portal_line(
                 dataset.get("notes"), max_len=100, default="No description"
             )
+            org = self.portal_line((dataset.get("organization") or {}).get("title"))
+            modified = self.short_date(dataset.get("metadata_modified"))
+            resources = dataset.get("resources") or []
+            num_resources = dataset.get("num_resources")
+            if not isinstance(num_resources, int):
+                num_resources = len(resources)
+            formats = sorted(
+                {
+                    self.portal_line(r.get("format"), max_len=40)
+                    for r in resources
+                    if isinstance(r, dict) and r.get("format")
+                }
+            )
+            num_tags = dataset.get("num_tags")
+            if not isinstance(num_tags, int):
+                num_tags = len(dataset.get("tags") or [])
 
+            id_line = f"   ID: {dataset_id}"
+            if name and name != dataset_id:
+                id_line += f" (name: {name})"
             lines.append(f"{i}. {title}")
-            lines.append(f"   ID: {dataset_id}")
+            lines.append(id_line)
+            facts = []
+            if org:
+                facts.append(f"Organization: {org}")
+            if modified:
+                facts.append(f"Modified: {modified}")
+            res_fact = f"Resources: {num_resources}"
+            if formats:
+                shown = ", ".join(formats[:6]) + (", …" if len(formats) > 6 else "")
+                res_fact += f" ({shown})"
+            facts.append(res_fact)
+            facts.append(f"Tags: {num_tags}")
+            lines.append("   " + " | ".join(facts))
             lines.append(f"   Description: {notes}")
             if dataset_id != "unknown":
                 lines.append(
@@ -709,23 +1110,64 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
 
         return "\n".join(lines)
 
-    def _format_dataset(self, dataset: Dict[str, Any]) -> str:
-        """Format dataset metadata for user display."""
+    def _format_dataset(
+        self, dataset: Dict[str, Any], *, max_resources: int = _DEFAULT_MAX_RESOURCES
+    ) -> str:
+        """Format dataset metadata for user display.
+
+        Every field the portal returned that helps date, attribute, license,
+        or locate the data is surfaced; empty values are omitted rather than
+        rendered as "unknown". Per-resource dates and download URLs let the
+        model date year-series resources.
+        """
         title = self.portal_line(dataset.get("title"), default="Untitled")
         dataset_id = self.safe_id(dataset.get("id"))
-        notes = self.portal_block(dataset.get("notes"), default="No description")
-        organization = self.portal_line(
-            (dataset.get("organization") or {}).get("title"), default="Unknown"
-        )
-        resources = dataset.get("resources", [])
-
-        lines = [
-            f"Dataset: {title}",
-            f"ID: {dataset_id}",
-            f"Organization: {organization}",
-            f"Description: {notes}",
-            "",
+        name = self.safe_id(dataset.get("name"), default="")
+        org = dataset.get("organization") or {}
+        org_title = self.portal_line(org.get("title"))
+        org_slug = self.safe_id(org.get("name"), default="")
+        license_title = self.portal_line(dataset.get("license_title"))
+        license_id = self.portal_line(dataset.get("license_id"), max_len=100)
+        created = self.short_date(dataset.get("metadata_created"))
+        modified = self.short_date(dataset.get("metadata_modified"))
+        tags = [
+            t.get("name") if isinstance(t, dict) else t
+            for t in dataset.get("tags") or []
         ]
+        groups = [
+            (g.get("title") or g.get("name")) if isinstance(g, dict) else g
+            for g in dataset.get("groups") or []
+        ]
+        notes = self.portal_block(dataset.get("notes"), default="No description")
+        resources = [r for r in dataset.get("resources") or [] if isinstance(r, dict)]
+
+        id_line = f"ID: {dataset_id}"
+        if name and name != dataset_id:
+            id_line += f" (name: {name})"
+        lines = [f"Dataset: {title}", id_line]
+        if org_title or org_slug:
+            lines.append(
+                f"Organization: {org_title or org_slug}"
+                + (f" ({org_slug})" if org_slug and org_title else "")
+            )
+        if license_title or license_id:
+            lines.append(
+                f"License: {license_title or license_id}"
+                + (f" ({license_id})" if license_id and license_title else "")
+            )
+        dates = []
+        if created:
+            dates.append(f"Created: {created}")
+        if modified:
+            dates.append(f"Modified: {modified}")
+        if dates:
+            lines.append(" | ".join(dates))
+        if any(tags):
+            lines.append(f"Tags: {join_cleaned(t for t in tags if t)}")
+        if any(groups):
+            lines.append(f"Groups: {join_cleaned(g for g in groups if g)}")
+        lines.append(f"Description: {notes}")
+        lines.append("")
         if dataset_id != "unknown":
             lines.append(
                 f"Portal URL: {self.plugin_config.portal_url}/dataset/{dataset_id}"
@@ -734,15 +1176,86 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
 
         if resources:
             lines.append(f"Resources ({len(resources)}):")
-            for i, resource in enumerate(resources, 1):
+            for i, resource in enumerate(resources[:max_resources], 1):
                 res_name = self.portal_line(resource.get("name"), default="Unnamed")
                 res_id = self.safe_id(resource.get("id"))
-                res_format = self.portal_line(resource.get("format"), default="unknown")
+                res_format = self.portal_line(
+                    resource.get("format"), max_len=40, default="unknown"
+                )
                 lines.append(f"  {i}. {res_name} ({res_format})")
                 lines.append(f"     Resource ID: {res_id}")
+                facts = []
+                r_created = self.short_date(resource.get("created"))
+                r_modified = self.short_date(
+                    resource.get("last_modified") or resource.get("metadata_modified")
+                )
+                size = self.human_size(resource.get("size"))
+                if r_created:
+                    facts.append(f"Created: {r_created}")
+                if r_modified:
+                    facts.append(f"Modified: {r_modified}")
+                if size:
+                    facts.append(f"Size: {size}")
+                if "datastore_active" in resource:
+                    facts.append(
+                        f"DataStore: {'yes' if resource.get('datastore_active') else 'no'}"
+                    )
+                if facts:
+                    lines.append("     " + " | ".join(facts))
+                url = self.display_portal_url(resource.get("url"))
+                if url:
+                    lines.append(f"     URL: {url}")
+                description = self.portal_line(resource.get("description"), max_len=120)
+                if description:
+                    lines.append(f"     Description: {description}")
+            remaining = len(resources) - max_resources
+            if remaining > 0:
+                lines.append(
+                    f"... and {remaining} more resource(s) (call get_dataset with "
+                    f"max_resources={min(len(resources), _MAX_RESOURCES)} to see all)"
+                )
         else:
             lines.append("No resources available for this dataset.")
 
+        return "\n".join(lines)
+
+    def _format_catalog_stats(
+        self,
+        count: int,
+        facets: Dict[str, List[Dict[str, Any]]],
+        *,
+        query: str = "",
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Format catalog counts and facet breakdowns for user display."""
+        city = self.plugin_config.city_name
+        scope = []
+        if query:
+            scope.append(f"query={clean_text(query, max_len=100, single_line=True)!r}")
+        for key, value in (filters or {}).items():
+            if value:
+                scope.append(
+                    f"{key}={clean_text(value, max_len=100, single_line=True)}"
+                )
+        header = f"Catalog: {count} public dataset(s) in {city}'s open data portal"
+        if scope:
+            header += f" (filters: {', '.join(scope)})"
+        lines = [header, ""]
+        for facet, items in facets.items():
+            label = _FACET_LABELS.get(facet, facet)
+            lines.append(f"{label} ({facet}):")
+            if not items:
+                lines.append("  (no values returned)")
+                continue
+            for item in items:
+                name = self.portal_line(item.get("name"), max_len=150)
+                display = (
+                    self.portal_line(item.get("display_name"), max_len=150) or name
+                )
+                label_text = (
+                    display if display == name or not name else f"{display} ({name})"
+                )
+                lines.append(f"  {label_text}: {self._as_int(item.get('count'))}")
         return "\n".join(lines)
 
     def _format_query_results(self, records: List[Dict[str, Any]], limit: int) -> str:

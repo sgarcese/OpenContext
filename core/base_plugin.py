@@ -10,8 +10,10 @@ the remaining ``DataPlugin`` abstract methods.
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from tenacity import (
@@ -38,6 +40,11 @@ logger = logging.getLogger(__name__)
 # digit; max 64 chars. Used by build_where_clause to reject field names that
 # could smuggle SQL fragments.
 _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
+
+# ``YYYY-MM-DD`` prefix of an ISO-8601 timestamp.
+_ISO_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}")
+# Hostname safe to echo back to the model when a URL's host is untrusted.
+_SAFE_HOSTNAME = re.compile(r"^[a-z0-9]([a-z0-9-]{0,62}\.)*[a-z0-9-]{1,63}$")
 
 HTTP_RETRY = retry(
     stop=stop_after_attempt(3),
@@ -191,6 +198,100 @@ class BaseOpenDataPlugin(DataPlugin):
         """Clean a portal value that must stay on one line (title, tag, name)."""
         cleaned = clean_text(value, max_len=max_len, single_line=True)
         return cleaned if cleaned else default
+
+    @staticmethod
+    def short_date(value: Any) -> str:
+        """Render a portal timestamp as ``YYYY-MM-DD`` (or ``""``).
+
+        Accepts ISO-8601 strings (with or without time/``Z``), epoch seconds,
+        and epoch milliseconds (ArcGIS). Anything unrecognized is returned
+        cleaned and single-line so nothing is silently dropped.
+        """
+        if value is None or value == "":
+            return ""
+        if isinstance(value, bool):
+            return ""
+        if isinstance(value, (int, float)):
+            try:
+                seconds = value / 1000 if value > 1e11 else value
+                return datetime.fromtimestamp(seconds, tz=UTC).strftime("%Y-%m-%d")
+            except (ValueError, OverflowError, OSError):
+                return ""
+        text = clean_text(value, max_len=40, single_line=True)
+        if _ISO_DATE_PREFIX.match(text):
+            return text[:10]
+        if text.isdigit():
+            return BaseOpenDataPlugin.short_date(int(text))
+        return text
+
+    @staticmethod
+    def human_size(value: Any) -> str:
+        """Render a byte count as ``B/KB/MB/GB`` (or the cleaned raw value)."""
+        if value is None or value == "" or isinstance(value, bool):
+            return ""
+        try:
+            size = float(value)
+        except (TypeError, ValueError):
+            return clean_text(value, max_len=DEFAULT_MAX_LINE, single_line=True)
+        if size < 0:
+            return ""
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if size < 1024 or unit == "TB":
+                return f"{int(size)} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+            size /= 1024
+        return ""  # pragma: no cover
+
+    def display_portal_url(self, url: Any, *, extra_hosts: Iterable[str] = ()) -> str:
+        """Render a portal-supplied URL only if its host is trusted.
+
+        Trusted hosts are the configured ``portal_url`` / ``base_url`` hosts
+        (and their subdomains) plus ``extra_hosts``. An untrusted URL is
+        never echoed; only its hostname is shown as ``(external: host)`` so
+        the model can still say what kind of link it is. This is the
+        display-side counterpart of the fetch-side allow-lists: a crafted
+        dataset record cannot plant an arbitrary link in the model's context.
+        """
+        if not url:
+            return ""
+        cleaned = clean_text(url, max_len=500, single_line=True)
+        parsed = urlparse(cleaned)
+        host = (parsed.hostname or "").lower()
+        if parsed.scheme not in ("http", "https") or not host:
+            return "(external: unparseable host)"
+        trusted: list[str] = []
+        for attr in ("portal_url", "base_url"):
+            configured = getattr(self.plugin_config, attr, None)
+            if configured:
+                configured_host = (urlparse(str(configured)).hostname or "").lower()
+                if configured_host:
+                    trusted.append(configured_host)
+        trusted.extend(h.lower().lstrip(".") for h in extra_hosts if h)
+        for t in trusted:
+            if host == t or host.endswith(f".{t}"):
+                return cleaned
+        if _SAFE_HOSTNAME.match(host):
+            return f"(external: {host})"
+        return "(external: unparseable host)"
+
+    def format_search_header(
+        self, total: int | None, shown: int, *, offset: int = 0
+    ) -> str:
+        """Header line for search/list results with the catalog-wide total.
+
+        ``total`` is the portal's total hit count (``None`` when the API did
+        not return one); ``shown`` is how many results follow.
+        """
+        city = self.plugin_config.city_name
+        if total is None or not isinstance(total, int) or total < shown:
+            return f"Found {shown} dataset(s) in {city}'s open data portal:"
+        if total > shown or offset:
+            first = offset + 1 if shown else 0
+            last = offset + shown
+            return (
+                f"Found {total} matching dataset(s) in {city}'s open data portal "
+                f"(showing {first}-{last}):"
+            )
+        return f"Found {total} dataset(s) in {city}'s open data portal:"
 
     def safe_id(self, value: Any, *, default: str = "unknown") -> str:
         """Return ``value`` if it looks like a valid identifier, else ``default``.

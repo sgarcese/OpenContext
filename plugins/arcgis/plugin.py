@@ -6,7 +6,6 @@ via the OGC API - Records (Hub Search API) and ArcGIS Feature Services.
 
 import logging
 import re
-from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -301,9 +300,16 @@ class ArcGISPlugin(BaseOpenDataPlugin):
     async def _tool_search_datasets(self, arguments: dict[str, Any]) -> ToolResult:
         query = arguments.get("query", "")
         limit = arguments.get("limit", 10)
-        datasets = await self.search_datasets(query, limit)
+        result = await self._search_hub(query, limit)
         return ToolResult(
-            content=[{"type": "text", "text": self._format_search_results(datasets)}],
+            content=[
+                {
+                    "type": "text",
+                    "text": self._format_search_results(
+                        result["results"], total=result["total"]
+                    ),
+                }
+            ],
             success=True,
         )
 
@@ -319,7 +325,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         query = arguments.get("query")
         buckets = await self.get_aggregations(field, query)
         return ToolResult(
-            content=[{"type": "text", "text": self._format_aggregations(field, buckets)}],
+            content=[
+                {"type": "text", "text": self._format_aggregations(field, buckets)}
+            ],
             success=True,
         )
 
@@ -337,7 +345,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         limit = arguments.get("limit", 100)
         records = await self._query_features(dataset_id, where, out_fields, limit)
         return ToolResult(
-            content=[{"type": "text", "text": self._format_query_results(records, limit)}],
+            content=[
+                {"type": "text", "text": self._format_query_results(records, limit)}
+            ],
             success=True,
         )
 
@@ -355,21 +365,26 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         Returns:
             List of dataset metadata dictionaries
         """
+        return (await self._search_hub(query, limit))["results"]
+
+    async def _search_hub(self, query: str, limit: int) -> dict[str, Any]:
+        """Search the Hub catalog; return ``{"results": [...], "total": int | None}``.
+
+        ``total`` is the catalog-wide match count (``numberMatched``).
+        """
         response = await self._call_hub_api(
             "/api/search/v1/collections/all/items",
             params={"q": query, "limit": limit},
         )
 
-        data = response.json()
-        features = data.get("features", [])
-        if not features:
-            return []
-
-        results = []
-        for feature in features:
-            props = feature.get("properties", {})
-            results.append(self._extract_dataset_summary(props))
-        return results
+        data = response.json() or {}
+        total = data.get("numberMatched")
+        features = data.get("features", []) or []
+        results = [
+            self._extract_dataset_summary(feature.get("properties", {}) or {})
+            for feature in features
+        ]
+        return {"results": results, "total": total if isinstance(total, int) else None}
 
     async def get_dataset(self, dataset_id: str) -> dict[str, Any]:
         """Get detailed metadata for a specific dataset.
@@ -395,8 +410,16 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                 "spatialReference": props.get("spatialReference", ""),
                 "geometryType": props.get("geometryType", ""),
                 "additionalResources": props.get("additionalResources", []),
-                "numRecords": props.get("numRecords", None),
+                "numRecords": props.get("numRecords", props.get("recordCount")),
                 "service_url": props.get("url", ""),
+                "size": props.get("size"),
+                "orgName": props.get("orgName", ""),
+                "categories": props.get("categories", []),
+                "typeKeywords": props.get("typeKeywords", []),
+                "lastEditDate": self.short_date(
+                    props.get("serviceLastEditDate") or props.get("lastEditDate")
+                ),
+                "accessInformation": props.get("accessInformation", ""),
             }
         )
         return result
@@ -685,12 +708,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
     @staticmethod
     def _epoch_ms_to_iso(epoch_ms: Any) -> str:
-        if epoch_ms is None:
-            return ""
-        try:
-            return datetime.fromtimestamp(int(epoch_ms) / 1000).strftime("%Y-%m-%d")
-        except (ValueError, TypeError, OSError):
-            return ""
+        """Render an ArcGIS epoch-millisecond timestamp as ``YYYY-MM-DD``."""
+        return BaseOpenDataPlugin.short_date(epoch_ms)
 
     @staticmethod
     def _extract_dataset_summary(props: dict[str, Any]) -> dict[str, Any]:
@@ -710,20 +729,50 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             "modified": ArcGISPlugin._epoch_ms_to_iso(props.get("modified")),
             "tags": props.get("tags", []),
             "extent": props.get("extent", []),
+            "recordCount": props.get("recordCount", props.get("numRecords")),
         }
 
-    def _format_search_results(self, datasets: list[dict[str, Any]]) -> str:
+    def _format_search_results(
+        self, datasets: list[dict[str, Any]], *, total: int | None = None
+    ) -> str:
+        """Format Hub search hits.
+
+        Args:
+            datasets: Summaries from :meth:`_extract_dataset_summary`.
+            total: Catalog-wide match count (``numberMatched``), if known.
+        """
         if not datasets:
             return "No datasets found."
 
-        lines = [f"Found {len(datasets)} dataset(s):\n"]
+        lines = [self.format_search_header(total, len(datasets)), ""]
 
         for i, ds in enumerate(datasets, 1):
             tags = join_cleaned(ds.get("tags", [])) if ds.get("tags") else "None"
-            lines.append(f"{i}. {self.portal_line(ds.get('title'), default='Untitled')}")
+            lines.append(
+                f"{i}. {self.portal_line(ds.get('title'), default='Untitled')}"
+            )
             lines.append(f"   ID: {self.safe_id(ds.get('id'))}")
-            lines.append(f"   Type: {self.portal_line(ds.get('type'), default='unknown')}")
-            lines.append(f"   Access: {self.portal_line(ds.get('access'), default='unknown')}")
+            lines.append(
+                f"   Type: {self.portal_line(ds.get('type'), default='unknown')}"
+            )
+            lines.append(
+                f"   Access: {self.portal_line(ds.get('access'), default='unknown')}"
+            )
+            facts = []
+            owner = self.portal_line(ds.get("owner"))
+            if owner:
+                facts.append(f"Owner: {owner}")
+            created = self.short_date(ds.get("created"))
+            modified = self.short_date(ds.get("modified"))
+            if created:
+                facts.append(f"Created: {created}")
+            if modified:
+                facts.append(f"Modified: {modified}")
+            records = ds.get("recordCount")
+            if isinstance(records, int):
+                facts.append(f"Records: {records}")
+            if facts:
+                lines.append("   " + " | ".join(facts))
             lines.append(
                 f"   Description: {self.portal_line(ds.get('description'), max_len=300, default='No description')}"
             )
@@ -734,49 +783,79 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         return "\n".join(lines)
 
     def _format_dataset(self, dataset: dict[str, Any]) -> str:
-        tags = join_cleaned(dataset.get("tags", [])) if dataset.get("tags") else "None"
+        """Format Hub item metadata; empty values are omitted."""
         line = self.portal_line
         lines = [
             f"Dataset: {line(dataset.get('title'), default='Untitled')}",
             f"ID: {self.safe_id(dataset.get('id'))}",
             f"Type: {line(dataset.get('type'), default='unknown')}",
             f"Access: {line(dataset.get('access'), default='unknown')}",
-            f"Owner: {line(dataset.get('owner'), default='unknown')}",
-            f"Created: {line(dataset.get('created'))}",
-            f"Modified: {line(dataset.get('modified'))}",
-            f"Description: {self.portal_block(dataset.get('description'), default='No description')}",
-            f"Snippet: {line(dataset.get('snippet'))}",
-            f"License: {self.portal_block(dataset.get('licenseInfo'), max_len=1000)}",
-            f"Spatial Reference: {line(dataset.get('spatialReference'))}",
-            f"Geometry Type: {line(dataset.get('geometryType'))}",
-            f"Number of Records: {line(dataset.get('numRecords'), default='N/A')}",
-            f"Tags: {tags}",
-            f"Extent: {line(dataset.get('extent', []))}",
-            f"Additional Resources: {line(dataset.get('additionalResources', []), max_len=1000)}",
-            f"URL: {self._display_url(dataset.get('url'))}",
-            f"Service URL: {self._display_url(dataset.get('service_url'))}",
         ]
+
+        def add(label: str, value: str) -> None:
+            if value:
+                lines.append(f"{label}: {value}")
+
+        owner = line(dataset.get("owner"))
+        org = line(dataset.get("orgName"))
+        if owner or org:
+            lines.append(
+                "Owner: " + (f"{owner} ({org})" if owner and org else owner or org)
+            )
+        dates = []
+        for label, key in (
+            ("Created", "created"),
+            ("Modified", "modified"),
+            ("Last edit", "lastEditDate"),
+        ):
+            value = self.short_date(dataset.get(key))
+            if value:
+                dates.append(f"{label}: {value}")
+        if dates:
+            lines.append(" | ".join(dates))
+        facts = []
+        records = dataset.get("numRecords")
+        if records is None:
+            records = dataset.get("recordCount")
+        if records is not None:
+            facts.append(f"Records: {line(records)}")
+        size = self.human_size(dataset.get("size"))
+        if size:
+            facts.append(f"Size: {size}")
+        if facts:
+            lines.append(" | ".join(facts))
+        add("License", self.portal_block(dataset.get("licenseInfo"), max_len=1000))
+        add("Access information", line(dataset.get("accessInformation")))
+        add("Snippet", line(dataset.get("snippet")))
+        lines.append(
+            f"Description: {self.portal_block(dataset.get('description'), default='No description')}"
+        )
+        add("Spatial Reference", line(dataset.get("spatialReference")))
+        add("Geometry Type", line(dataset.get("geometryType")))
+        add("Tags", join_cleaned(dataset.get("tags") or []))
+        add("Categories", join_cleaned(dataset.get("categories") or []))
+        add("Type keywords", join_cleaned(dataset.get("typeKeywords") or []))
+        extent = dataset.get("extent")
+        if extent:
+            add("Extent", line(extent))
+        additional = dataset.get("additionalResources")
+        if additional:
+            add("Additional Resources", line(additional, max_len=1000))
+        add("URL", self._display_url(dataset.get("url")))
+        add("Service URL", self._display_url(dataset.get("service_url")))
         return "\n".join(lines)
 
     def _display_url(self, url: Any) -> str:
         """Render a portal-supplied URL only if its host is trusted.
 
-        Reuses :meth:`_validate_feature_url` so the same allow-list that
-        gates *fetching* also gates what the model is *shown*; an attacker
-        cannot plant a link to an arbitrary host in a dataset record.
+        Delegates to :meth:`BaseOpenDataPlugin.display_portal_url` with the
+        same allow-list that gates *fetching* (portal host, ``*.arcgis.com``,
+        ``trusted_service_hosts``), so an attacker cannot plant a link to an
+        arbitrary host in a dataset record.
         """
-        if not url:
-            return ""
-        cleaned = self.portal_line(url, max_len=500)
-        try:
-            self._validate_feature_url(
-                cleaned,
-                self.plugin_config.portal_url,
-                self.plugin_config.trusted_service_hosts,
-            )
-        except ValueError:
-            return "(omitted: URL host is not in the trusted list)"
-        return cleaned
+        return self.display_portal_url(
+            url, extra_hosts=("arcgis.com", *self.plugin_config.trusted_service_hosts)
+        )
 
     def _format_schema(self, fields: list[dict[str, Any]]) -> str:
         """Format schema information for user display."""

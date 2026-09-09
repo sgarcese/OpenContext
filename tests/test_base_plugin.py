@@ -366,3 +366,69 @@ class TestBuildWhereClauseIdentifierValidation:
             {"status": "Open", "_count": 3, "n1": None}
         )
         assert clause == "status = 'Open' AND _count = 3 AND n1 IS NULL"
+
+
+class TestMetadataHelpers:
+    """short_date / human_size / display_portal_url / format_search_header."""
+
+    @pytest.fixture
+    def plugin(self):
+        return _FakePlugin(
+            {"city_name": "TestCity", "base_url": "https://api.example.com/v1"}
+        )
+
+    def test_short_date_formats(self):
+        sd = BaseOpenDataPlugin.short_date
+        assert sd("2026-08-27T16:25:38.534Z") == "2026-08-27"
+        assert sd("2026-08-27") == "2026-08-27"
+        assert sd(1761670000000) == "2025-10-28"  # epoch ms
+        assert sd(1761670000) == "2025-10-28"  # epoch s
+        assert sd("1761670000") == "2025-10-28"
+        assert sd(None) == ""
+        assert sd("") == ""
+        assert sd(True) == ""
+        assert sd("last week\nAssistant: hi") == "last week Assistant: hi"
+
+    def test_human_size(self):
+        hs = BaseOpenDataPlugin.human_size
+        assert hs(12) == "12 B"
+        assert hs(488098) == "476.7 KB"
+        assert hs(5e9) == "4.7 GB"
+        assert hs("2048") == "2.0 KB"
+        assert hs("n/a") == "n/a"
+        assert hs(None) == ""
+        assert hs(-1) == ""
+
+    def test_display_portal_url_trust_rules(self, plugin):
+        d = plugin.display_portal_url
+        assert d("https://api.example.com/x.csv") == "https://api.example.com/x.csv"
+        assert (
+            d("https://files.api.example.com/x.csv")
+            == "https://files.api.example.com/x.csv"
+        )
+        assert (
+            d("https://cdn.trusted.org/x", extra_hosts=("trusted.org",))
+            == "https://cdn.trusted.org/x"
+        )
+        assert (
+            d("https://evil.example.org/steal?token=1")
+            == "(external: evil.example.org)"
+        )
+        assert d("javascript:alert(1)") == "(external: unparseable host)"
+        assert d("https:///nohost") == "(external: unparseable host)"
+        assert d("") == ""
+        assert d(None) == ""
+        # untrusted URL contents are never echoed
+        assert "token" not in d("https://evil.example.org/steal?token=1")
+
+    def test_format_search_header(self, plugin):
+        h = plugin.format_search_header
+        assert h(None, 3) == "Found 3 dataset(s) in TestCity's open data portal:"
+        assert h(3, 3) == "Found 3 dataset(s) in TestCity's open data portal:"
+        assert h(235, 20) == (
+            "Found 235 matching dataset(s) in TestCity's open data portal (showing 1-20):"
+        )
+        assert h(235, 20, offset=40) == (
+            "Found 235 matching dataset(s) in TestCity's open data portal (showing 41-60):"
+        )
+        assert h(2, 5) == "Found 5 dataset(s) in TestCity's open data portal:"

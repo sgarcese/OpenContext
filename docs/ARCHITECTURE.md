@@ -120,11 +120,14 @@ plugins:
 
 | Tool | Description |
 |------|-------------|
-| `ckan__search_datasets(query, limit)` | Search for datasets |
-| `ckan__get_dataset(dataset_id)` | Get dataset metadata |
+| `ckan__search_datasets(query, limit)` | Free-text search with catalog-wide match count |
+| `ckan__list_datasets(query, filters…, sort, limit, offset)` | Browse the catalog by organization/tag/format/license/group, sorted and paged |
+| `ckan__get_catalog_stats(facets, query, filters…, limit)` | Dataset counts overall and per facet value |
+| `ckan__get_dataset(dataset_id, max_resources)` | Full dataset metadata incl. license, dates, tags, and per-resource dates/URLs |
 | `ckan__query_data(resource_id, filters, limit)` | Query data from a resource |
 | `ckan__get_schema(resource_id)` | Get schema for a resource |
 | `ckan__execute_sql(sql)` | Execute PostgreSQL SELECT queries (advanced) |
+| `ckan__aggregate_data(resource_id, metrics, group_by, …)` | GROUP BY aggregations without writing SQL |
 
 **SQL execution:** The `execute_sql` tool allows complex PostgreSQL queries (CTEs, window functions, joins). Only SELECT is allowed. INSERT, UPDATE, DELETE, DROP, and other destructive operations are blocked. Resource IDs must be valid UUIDs in double quotes: `FROM "uuid-here"`. See [CKAN API docs](https://docs.ckan.org/en/latest/api/) for details.
 
