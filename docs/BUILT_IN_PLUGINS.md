@@ -71,7 +71,9 @@ See [CKAN API documentation](https://docs.ckan.org/en/latest/api/) for details.
 
 For Socrata-based open data portals (e.g., data.cityofchicago.org, data.cityofnewyork.us, data.seattle.gov).
 
-**Note:** Socrata requires a free app token. Register at [https://dev.socrata.com/register](https://dev.socrata.com/register).
+**Note:** Socrata requires a free App Token. Register at [https://dev.socrata.com/register](https://dev.socrata.com/register), or generate one from a portal's *Developer Settings → App Tokens*.
+
+**Careful — App Token vs. API Key:** Socrata's developer console also offers a separate "API Key" credential (*Developer Settings → API Keys*), which issues a **Key ID + Key Secret pair** for HTTP Basic Auth on authenticated requests (writes, private datasets). This plugin does not implement Basic Auth — it sends `app_token` bare as the `X-App-Token` header, so only a real App Token works here. Pasting an API Key's Key ID in as `app_token` fails silently for some tools and not others: `search_datasets`/`get_dataset` keep working, but `query_dataset` fails with `"Invalid app_token specified"` (HTTP 403) on the `/resource/{id}.json` endpoint. No secret/private key is needed for public open-data portals — the bare App Token is sufficient.
 
 ### Configuration
 
