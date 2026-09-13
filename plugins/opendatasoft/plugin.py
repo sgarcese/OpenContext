@@ -34,6 +34,7 @@ def _clamp_limit(limit: Any, default: int = MAX_RECORDS_LIMIT) -> int:
         return default
     return max(1, min(value, MAX_RECORDS_LIMIT))
 
+
 # Whitelists for ODSQL identifiers and aggregate expressions assembled by
 # aggregate_data, to prevent injection through field names / aliases. Mirrors
 # the CKAN plugin's approach.
@@ -50,7 +51,9 @@ _ORDER_BY_DIRECTION = re.compile(r"^(asc|desc)$", re.IGNORECASE)
 # Opendatasoft dataset ids are URL slugs (letters, digits, -, _, and an
 # optional @domain suffix). Interpolated into the request path, so anything
 # outside this pattern (slashes, dots, query characters) is rejected.
-_SAFE_DATASET_ID = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}(@[a-zA-Z0-9_-]{1,63})?$")
+_SAFE_DATASET_ID = re.compile(
+    r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}(@[a-zA-Z0-9_-]{1,63})?$"
+)
 
 
 def _validate_dataset_id(dataset_id: str) -> str:

@@ -924,7 +924,10 @@ class TestAggregateWithoutGroupBy:
         plugin._initialized = True
         mock_client = AsyncMock()
         mock_response = Mock()
-        mock_response.json.return_value = {"total_count": 1728, "results": [{"n": 1728}]}
+        mock_response.json.return_value = {
+            "total_count": 1728,
+            "results": [{"n": 1728}],
+        }
         mock_response.raise_for_status = Mock()
         mock_client.get = AsyncMock(return_value=mock_response)
         plugin.client = mock_client
@@ -933,7 +936,9 @@ class TestAggregateWithoutGroupBy:
         assert result.get("error") is not True
         assert mock_client.get.call_args[1]["params"]["limit"] == 1
 
-        await plugin.aggregate_data("ds", metrics={"n": "count(*)"}, group_by=["f"], limit=50)
+        await plugin.aggregate_data(
+            "ds", metrics={"n": "count(*)"}, group_by=["f"], limit=50
+        )
         assert mock_client.get.call_args[1]["params"]["limit"] == 50
 
 
@@ -977,9 +982,7 @@ class TestDatasetIdValidation:
     @pytest.mark.asyncio
     async def test_query_and_aggregate_also_guarded(self):
         plugin, _ = self._plugin()
-        r = await plugin.execute_tool(
-            "query_data", {"dataset_id": "../x", "limit": 1}
-        )
+        r = await plugin.execute_tool("query_data", {"dataset_id": "../x", "limit": 1})
         assert r.success is False
         r = await plugin.execute_tool(
             "aggregate_data", {"dataset_id": "../x", "metrics": {"n": "count(*)"}}
@@ -1001,7 +1004,10 @@ class TestCodeReviewFixes:
         plugin._initialized = True
         mock_client = AsyncMock()
         mock_response = Mock()
-        mock_response.json.return_value = get_return or {"total_count": 0, "results": []}
+        mock_response.json.return_value = get_return or {
+            "total_count": 0,
+            "results": [],
+        }
         mock_response.raise_for_status = Mock()
         mock_client.get = AsyncMock(return_value=mock_response)
         plugin.client = mock_client
