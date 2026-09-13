@@ -35,8 +35,10 @@ plugins:
 
 | Tool                                                                                     | Description                                                                                        |
 | ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
-| `ckan__search_datasets(query, limit)`                                                    | Search for datasets                                                                                |
-| `ckan__get_dataset(dataset_id)`                                                          | Get dataset metadata                                                                               |
+| `ckan__search_datasets(query, limit)`                                                    | Free-text search; the header reports the catalog-wide match count                                  |
+| `ckan__list_datasets(query, organization, tag, format, license, group, sort, limit, offset)` | Browse the catalog with exact-match filters, sorting (default: most recently modified) and paging |
+| `ckan__get_catalog_stats(facets, query, organization, tag, format, license, group, limit)` | Dataset counts overall and per organization / tag / format / license / group                    |
+| `ckan__get_dataset(dataset_id, max_resources)`                                           | Full metadata: organization, license, created/modified dates, tags, groups, and every resource with format, dates, size and download URL |
 | `ckan__query_data(resource_id, filters, limit)`                                          | Query data from a resource                                                                         |
 | `ckan__get_schema(resource_id)`                                                          | Get schema for a resource                                                                          |
 | `ckan__execute_sql(sql)`                                                                 | Execute PostgreSQL SELECT queries (advanced)                                                       |
@@ -122,7 +124,9 @@ This plugin uses two API layers:
 
 For Socrata-based open data portals (e.g., data.cityofchicago.org, data.cityofnewyork.us, data.seattle.gov).
 
-**Note:** A Socrata app token is **required**. Register for a free token at [https://dev.socrata.com/register](https://dev.socrata.com/register).
+**Note:** A Socrata App Token is **required**. Register for a free token at [https://dev.socrata.com/register](https://dev.socrata.com/register), or generate one from a portal's *Developer Settings → App Tokens*.
+
+**Careful — App Token vs. API Key:** Socrata's developer console also offers a separate "API Key" credential (*Developer Settings → API Keys*), which issues a **Key ID + Key Secret pair** for HTTP Basic Auth on authenticated requests (writes, private datasets). This plugin does not implement Basic Auth — it sends `app_token` bare as the `X-App-Token` header, so only a real App Token works here. Pasting an API Key's Key ID in as `app_token` fails silently for some tools and not others: `search_datasets`/`get_dataset` keep working, but `query_dataset` fails with `"Invalid app_token specified"` (HTTP 403) on the `/resource/{id}.json` endpoint. No secret/private key is needed for public open-data portals — the bare App Token is sufficient.
 
 ### Configuration
 
