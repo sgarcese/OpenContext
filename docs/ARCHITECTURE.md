@@ -40,10 +40,14 @@ plugins/                # Built-in plugins
 │   ├── plugin.py
 │   ├── config_schema.py
 │   └── where_validator.py
-└── socrata/            # Socrata open data portals
+├── socrata/            # Socrata open data portals
+│   ├── plugin.py
+│   ├── config_schema.py
+│   └── soql_validator.py
+└── opendatasoft/       # Opendatasoft Explore v2.1 portals
     ├── plugin.py
     ├── config_schema.py
-    └── soql_validator.py
+    └── odsql_validator.py
 
 cli/                    # Typer CLI (opencontext command)
 ├── main.py             # Command registration
@@ -209,6 +213,34 @@ plugins:
 | `socrata__query_dataset(dataset_id, soql_query)` | Query data using SoQL |
 | `socrata__list_categories()` | List all categories with dataset counts |
 | `socrata__execute_sql(dataset_id, soql)` | Execute raw SoQL SELECT (advanced) |
+
+### Built-in: Opendatasoft
+
+For Opendatasoft portals using the Explore API v2.1 (e.g., data.longbeach.gov, public.opendatasoft.com).
+
+**Configuration:**
+
+```yaml
+plugins:
+  opendatasoft:
+    enabled: true
+    base_url: "https://data.yourcity.gov"
+    portal_url: "https://data.yourcity.gov"
+    city_name: "Your City"
+    timeout: 30
+    api_key: "${ODS_API_KEY}"  # Optional: private datasets only
+```
+
+**Tools:**
+
+| Tool | Description |
+|------|-------------|
+| `opendatasoft__search_datasets(query, limit)` | Search the portal catalog |
+| `opendatasoft__get_dataset(dataset_id)` | Dataset metadata (publisher, license, dates, counts) |
+| `opendatasoft__get_schema(dataset_id)` | Field names and types for ODSQL clauses |
+| `opendatasoft__query_data(dataset_id, where, select, order_by, limit)` | Query records with ODSQL |
+| `opendatasoft__aggregate_data(dataset_id, metrics, group_by, …)` | GROUP BY aggregations |
+| `opendatasoft__list_categories()` | Portal themes with dataset counts |
 
 ### Custom Plugins
 
