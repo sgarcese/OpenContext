@@ -572,7 +572,7 @@ class TestExecuteToolMissingArgs:
     async def test_execute_tool_exception_returns_error(self, initialized_plugin):
         with patch.object(
             initialized_plugin,
-            "search_datasets",
+            "_search_hub",
             new_callable=AsyncMock,
             side_effect=RuntimeError("hub down"),
         ):
@@ -591,12 +591,10 @@ class TestExecuteToolMissingArgs:
 
 class TestEpochMsToIso:
     def test_converts_valid_epoch(self):
-        # epoch ms=0 resolves to 1969-12-31 or 1970-01-01 depending on local TZ offset
-        from datetime import datetime
-
-        expected = datetime.fromtimestamp(0).strftime("%Y-%m-%d")
+        # Rendered in UTC via BaseOpenDataPlugin.short_date, so epoch 0 is
+        # always 1970-01-01 regardless of the local timezone.
         result = ArcGISPlugin._epoch_ms_to_iso(0)
-        assert result == expected
+        assert result == "1970-01-01"
 
     def test_converts_recent_epoch(self):
         # 2000-01-01 00:00:00 UTC = 946684800000 ms
@@ -608,8 +606,11 @@ class TestEpochMsToIso:
     def test_returns_empty_for_none(self):
         assert ArcGISPlugin._epoch_ms_to_iso(None) == ""
 
-    def test_returns_empty_for_invalid_value(self):
-        assert ArcGISPlugin._epoch_ms_to_iso("not-a-number") == ""
+    def test_returns_unrecognized_value_unchanged(self):
+        # short_date passes unrecognized values through (cleaned) rather than
+        # dropping them, so the portal's raw text is still visible.
+        result = ArcGISPlugin._epoch_ms_to_iso("not-a-number")
+        assert result == "not-a-number"
 
     def test_returns_empty_for_out_of_range(self):
         # Use a negative value far in the past that raises OSError on some platforms

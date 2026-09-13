@@ -370,8 +370,6 @@ class TestBuildWhereClauseIdentifierValidation:
 
 class TestMetadataHelpers:
     """short_date / human_size / display_portal_url / format_search_header."""
-class TestRedirectHeaderScoping:
-    """_create_http_client credential-header protection across redirects."""
 
     @pytest.fixture
     def plugin(self):
@@ -434,6 +432,14 @@ class TestRedirectHeaderScoping:
             "Found 235 matching dataset(s) in TestCity's open data portal (showing 41-60):"
         )
         assert h(2, 5) == "Found 5 dataset(s) in TestCity's open data portal:"
+
+
+class TestRedirectHeaderScoping:
+    """_create_http_client credential-header protection across redirects."""
+
+    @pytest.fixture
+    def plugin(self):
+        return _FakePlugin(
             {"city_name": "TestCity", "base_url": "https://data.example.com"}
         )
 

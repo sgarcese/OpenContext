@@ -1225,6 +1225,8 @@ class TestMetadataEnrichment:
         assert result.success
         assert "Found 120 matching dataset(s)" in result.content[0]["text"]
         mock_search.assert_called_once_with({"q": "a", "limit": 1})
+
+
 class TestRedirectTokenScoping:
     @pytest.fixture
     def socrata_config(self):
