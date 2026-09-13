@@ -10,8 +10,9 @@ the remaining ``DataPlugin`` abstract methods.
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from tenacity import (
@@ -38,6 +39,19 @@ logger = logging.getLogger(__name__)
 # digit; max 64 chars. Used by build_where_clause to reject field names that
 # could smuggle SQL fragments.
 _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
+
+
+def _host_is_trusted(host: str, trusted: Iterable[str]) -> bool:
+    """Whether ``host`` equals or is a subdomain of any trusted host."""
+    host = (host or "").lower()
+    if not host:
+        return False
+    for t in trusted:
+        t = t.lower().lstrip(".")
+        if t and (host == t or host.endswith(f".{t}")):
+            return True
+    return False
+
 
 HTTP_RETRY = retry(
     stop=stop_after_attempt(3),
@@ -119,15 +133,76 @@ class BaseOpenDataPlugin(DataPlugin):
         self.plugin_config: BasePluginConfig = self.config_class(**config)
         self._clients: list[httpx.AsyncClient] = []
 
-    def _create_http_client(self, **kwargs: Any) -> httpx.AsyncClient:
+    def _trusted_request_hosts(self, extra_hosts: Iterable[str] = ()) -> frozenset[str]:
+        """Hosts a client may keep credential headers for across redirects.
+
+        The configured ``portal_url`` / ``base_url`` hosts (and anything in
+        ``extra_hosts``), lowercased. Subdomain matching is handled by
+        :func:`_host_is_trusted`.
+        """
+        hosts: set[str] = set()
+        for attr in ("portal_url", "base_url"):
+            configured = getattr(self.plugin_config, attr, None)
+            if configured:
+                host = (urlparse(str(configured)).hostname or "").lower()
+                if host:
+                    hosts.add(host)
+        hosts.update(h.lower().lstrip(".") for h in extra_hosts if h)
+        return frozenset(hosts)
+
+    def _create_http_client(
+        self,
+        *,
+        protect_headers: Iterable[str] = (),
+        trusted_hosts: Iterable[str] = (),
+        **kwargs: Any,
+    ) -> httpx.AsyncClient:
         """Create an :class:`httpx.AsyncClient` and track it for shutdown.
 
+        When ``protect_headers`` is given, the client follows redirects but a
+        request event hook strips those header names on any hop whose host is
+        not trusted. Socrata occasionally renames a portal's domain (e.g.
+        ``data.sfgov.org`` -> ``data.sf.gov``) and 301s the old one; following
+        redirects keeps a lagging ``portal_url`` working, and the hook makes
+        sure a credential (API key, app token) is not forwarded to whatever
+        host the redirect points at — a lapsed domain can be re-registered by
+        someone else. httpx already strips ``Authorization`` cross-origin, but
+        not custom headers such as ``X-App-Token``; this covers both.
+
         Args:
+            protect_headers: Header names to drop on untrusted hops. Setting
+                any also forces ``follow_redirects=True``.
+            trusted_hosts: Extra hostnames (beyond portal/base) treated as
+                trusted for header retention.
             **kwargs: Forwarded to ``httpx.AsyncClient``.
 
         Returns:
             The created async HTTP client.
         """
+        protect = tuple(protect_headers)
+        if protect:
+            kwargs.setdefault("follow_redirects", True)
+            trusted = self._trusted_request_hosts(trusted_hosts)
+            lowered = tuple(h.lower() for h in protect)
+
+            async def _strip_untrusted_headers(request: httpx.Request) -> None:
+                host = (request.url.host or "").lower()
+                if _host_is_trusted(host, trusted):
+                    return
+                for original, lower in zip(protect, lowered):
+                    # httpx.Headers is case-insensitive; delete by the name present.
+                    for name in (original, lower):
+                        if name in request.headers:
+                            del request.headers[name]
+                            logger.warning(
+                                "Dropping %s header on redirect to untrusted host %r",
+                                original,
+                                host,
+                            )
+
+            hooks = kwargs.setdefault("event_hooks", {})
+            hooks.setdefault("request", []).append(_strip_untrusted_headers)
+
         client = httpx.AsyncClient(**kwargs)
         self._clients.append(client)
         return client

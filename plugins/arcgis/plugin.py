@@ -62,15 +62,24 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
             # Create both clients via the shared helper so they are tracked
             # for shutdown by the base class.
+            # Follow redirects (a renamed Hub domain keeps working) and drop
+            # the bearer token if a hop leaves the trusted hosts. *.arcgis.com
+            # and trusted_service_hosts stay trusted (feature services live
+            # there); the same allow-list gates feature-service fetching.
+            trusted = ("arcgis.com", *self.plugin_config.trusted_service_hosts)
             self.hub_client = self._create_http_client(
                 base_url=self.plugin_config.portal_url,
                 headers=headers,
                 timeout=self.plugin_config.timeout,
+                protect_headers=("Authorization",),
+                trusted_hosts=trusted,
             )
 
             self.feature_client = self._create_http_client(
                 headers=feature_headers,
                 timeout=self.plugin_config.timeout,
+                protect_headers=("Authorization",),
+                trusted_hosts=trusted,
             )
 
             await self._call_hub_api("/api/search/v1/collections")
