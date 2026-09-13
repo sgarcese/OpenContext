@@ -16,10 +16,9 @@ async def test_load_fake_plugin_registers_prefixed_tools(
 
     names = {t["name"] for t in pm.get_all_tools()}
     assert "integration_test_fake__echo" in names
-    assert pm.tools["integration_test_fake__echo"] == (
-        "integration_test_fake",
-        "echo",
-    )
+    plugin_name, tool_def = pm.tools["integration_test_fake__echo"]
+    assert plugin_name == "integration_test_fake"
+    assert tool_def.name == "echo"
 
     result = await pm.execute_tool(
         "integration_test_fake__echo", {"msg": "namespace-ok"}

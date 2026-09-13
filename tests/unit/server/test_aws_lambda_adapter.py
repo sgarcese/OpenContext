@@ -356,12 +356,13 @@ class TestLambdaHandler:
             json.dumps({"result": "success"}),
         )
 
-        with patch.object(
-            adapter.UniversalHTTPHandler, "__init__", tracking_init
-        ), patch.object(
-            adapter.UniversalHTTPHandler,
-            "handle_request",
-            AsyncMock(return_value=fake_response),
+        with (
+            patch.object(adapter.UniversalHTTPHandler, "__init__", tracking_init),
+            patch.object(
+                adapter.UniversalHTTPHandler,
+                "handle_request",
+                AsyncMock(return_value=fake_response),
+            ),
         ):
             response1 = lambda_handler(event, context)
             response2 = lambda_handler(event, context)

@@ -310,7 +310,9 @@ Use get_schema first for column names.""",
         )
 
     async def _tool_query_dataset(self, arguments: Dict[str, Any]) -> ToolResult:
-        data = await self._query_dataset(arguments["dataset_id"], arguments["soql_query"])
+        data = await self._query_dataset(
+            arguments["dataset_id"], arguments["soql_query"]
+        )
         display_limit = self._parse_soql_limit(arguments["soql_query"], default=100)
         return ToolResult(
             content=[

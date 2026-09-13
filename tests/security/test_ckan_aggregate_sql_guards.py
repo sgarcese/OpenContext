@@ -148,8 +148,8 @@ class TestValidateMetricExpr:
 class TestAggregateDataIntegration:
     """Integration-style tests calling aggregate_data() on a CKANPlugin instance.
 
-    Validation must raise ValueError before any SQL is assembled or any HTTP
-    call is dispatched.
+    Validation must reject the call before any SQL is assembled or any HTTP
+    call is dispatched; aggregate_data reports the rejection as an error dict.
     """
 
     @pytest.fixture()
@@ -161,56 +161,66 @@ class TestAggregateDataIntegration:
 
     @pytest.mark.asyncio
     async def test_injected_group_by_raises_before_http(self, plugin):
-        """A SQL-injected group_by field raises ValueError before any HTTP call."""
-        with pytest.raises(ValueError, match="Invalid identifier"):
-            await plugin.aggregate_data(
-                resource_id=RESOURCE_ID,
-                group_by=["field; DROP TABLE x--"],
-                metrics={"total": "count(*)"},
-            )
+        """A SQL-injected group_by field is rejected before any HTTP call."""
+        result = await plugin.aggregate_data(
+            resource_id=RESOURCE_ID,
+            group_by=["field; DROP TABLE x--"],
+            metrics={"total": "count(*)"},
+        )
+
+        assert result["error"] is True
+        assert "Invalid identifier" in result["message"]
 
     @pytest.mark.asyncio
     async def test_injected_metric_expr_raises_before_http(self, plugin):
-        """A disallowed metric expression raises ValueError before any HTTP call."""
-        with pytest.raises(ValueError, match="Disallowed metric expression"):
-            await plugin.aggregate_data(
-                resource_id=RESOURCE_ID,
-                group_by=["category"],
-                metrics={"x": "count(*) UNION SELECT 1"},
-            )
+        """A disallowed metric expression is rejected before any HTTP call."""
+        result = await plugin.aggregate_data(
+            resource_id=RESOURCE_ID,
+            group_by=["category"],
+            metrics={"x": "count(*) UNION SELECT 1"},
+        )
+
+        assert result["error"] is True
+        assert "Disallowed metric expression" in result["message"]
 
     @pytest.mark.asyncio
     async def test_injected_filter_key_raises_before_http(self, plugin):
-        """A SQL-injected filters dict key raises ValueError before any HTTP call."""
-        with pytest.raises(ValueError, match="Invalid identifier"):
-            await plugin.aggregate_data(
-                resource_id=RESOURCE_ID,
-                group_by=["category"],
-                metrics={"total": "count(*)"},
-                filters={"field; DROP TABLE x": "val"},
-            )
+        """A SQL-injected filters dict key is rejected before any HTTP call."""
+        result = await plugin.aggregate_data(
+            resource_id=RESOURCE_ID,
+            group_by=["category"],
+            metrics={"total": "count(*)"},
+            filters={"field; DROP TABLE x": "val"},
+        )
+
+        assert result["error"] is True
+        assert "Invalid identifier" in result["message"]
 
     @pytest.mark.asyncio
     async def test_injected_having_key_raises_before_http(self, plugin):
-        """A SQL-injected having dict key raises ValueError before any HTTP call."""
-        with pytest.raises(ValueError, match="Invalid identifier"):
-            await plugin.aggregate_data(
-                resource_id=RESOURCE_ID,
-                group_by=["category"],
-                metrics={"total": "count(*)"},
-                having={"expr; DROP TABLE x": 10},
-            )
+        """A SQL-injected having dict key is rejected before any HTTP call."""
+        result = await plugin.aggregate_data(
+            resource_id=RESOURCE_ID,
+            group_by=["category"],
+            metrics={"total": "count(*)"},
+            having={"expr; DROP TABLE x": 10},
+        )
+
+        assert result["error"] is True
+        assert "Disallowed metric expression" in result["message"]
 
     @pytest.mark.asyncio
     async def test_injected_order_by_raises_before_http(self, plugin):
-        """A SQL-injected order_by value raises ValueError before any HTTP call."""
-        with pytest.raises(ValueError, match="Invalid identifier"):
-            await plugin.aggregate_data(
-                resource_id=RESOURCE_ID,
-                group_by=["category"],
-                metrics={"total": "count(*)"},
-                order_by="field; DROP TABLE x",
-            )
+        """A SQL-injected order_by value is rejected before any HTTP call."""
+        result = await plugin.aggregate_data(
+            resource_id=RESOURCE_ID,
+            group_by=["category"],
+            metrics={"total": "count(*)"},
+            order_by="field; DROP TABLE x",
+        )
+
+        assert result["error"] is True
+        assert "Invalid order_by" in result["message"]
 
     # ── happy path — mock execute_sql, assert it is reached ───────────────────
 

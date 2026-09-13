@@ -1,6 +1,5 @@
 """Pydantic configuration schema for ArcGIS Hub plugin."""
 
-
 from pydantic import Field, field_validator
 
 from core.config_base import BasePluginConfig

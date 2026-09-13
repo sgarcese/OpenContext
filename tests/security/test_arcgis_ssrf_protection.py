@@ -69,37 +69,37 @@ class TestValidateFeatureUrl:
             (
                 "http://169.254.169.254/latest/meta-data/iam/",
                 "https://hub.arcgis.com",
-                "not within allowed domains",
+                "not trusted",
             ),
             (
                 "https://evil.com/steal",
                 "https://hub.arcgis.com",
-                "not within allowed domains",
+                "not trusted",
             ),
             (
                 "https://notarcgis.com/arcgis/rest/services/Foo/FeatureServer",
                 "https://hub.arcgis.com",
-                "not within allowed domains",
+                "not trusted",
             ),
             (
                 "file:///etc/passwd",
                 "https://hub.arcgis.com",
-                "invalid scheme",
+                "must use http",
             ),
             (
                 "ftp://services.arcgis.com/abc",
                 "https://hub.arcgis.com",
-                "invalid scheme",
+                "must use http",
             ),
             (
                 "https://internal.vpc.local/service",
                 "https://hub.arcgis.com",
-                "not within allowed domains",
+                "not trusted",
             ),
             (
                 "https://169.254.169.254.evil.com/steal",
                 "https://hub.arcgis.com",
-                "not within allowed domains",
+                "not trusted",
             ),
         ],
         ids=[
@@ -152,7 +152,7 @@ class TestQueryDataSSRF:
                 "service_url": "http://169.254.169.254/latest/meta-data/",
             },
         ):
-            with pytest.raises(ValueError, match="not within allowed domains"):
+            with pytest.raises(ValueError, match="not trusted"):
                 await plugin.query_data("abc123", {"where": "1=1"}, 100)
 
         plugin.feature_client.get.assert_not_called()
@@ -171,7 +171,7 @@ class TestQueryDataSSRF:
                 "service_url": "https://evil.com/steal",
             },
         ):
-            with pytest.raises(ValueError, match="not within allowed domains"):
+            with pytest.raises(ValueError, match="not trusted"):
                 await plugin.query_data("abc123", {"where": "1=1"}, 100)
 
         plugin.feature_client.get.assert_not_called()

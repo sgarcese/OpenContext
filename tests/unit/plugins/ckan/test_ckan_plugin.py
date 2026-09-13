@@ -934,7 +934,10 @@ class TestAggregateDataSecurityHardening:
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = Mock()
-            mock_response.json.return_value = {"success": True, "result": {"records": [], "fields": []}}
+            mock_response.json.return_value = {
+                "success": True,
+                "result": {"records": [], "fields": []},
+            }
             mock_response.raise_for_status = Mock()
             mock_client.post = AsyncMock(return_value=mock_response)
             mock_client_class.return_value = mock_client
@@ -961,7 +964,10 @@ class TestAggregateDataSecurityHardening:
         with patch("httpx.AsyncClient") as mock_client_class:
             mock_client = AsyncMock()
             mock_response = Mock()
-            mock_response.json.return_value = {"success": True, "result": {"records": [], "fields": []}}
+            mock_response.json.return_value = {
+                "success": True,
+                "result": {"records": [], "fields": []},
+            }
             mock_response.raise_for_status = Mock()
             mock_client.post = AsyncMock(return_value=mock_response)
             mock_client_class.return_value = mock_client

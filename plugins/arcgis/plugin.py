@@ -304,7 +304,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         query = arguments.get("query")
         buckets = await self.get_aggregations(field, query)
         return ToolResult(
-            content=[{"type": "text", "text": self._format_aggregations(field, buckets)}],
+            content=[
+                {"type": "text", "text": self._format_aggregations(field, buckets)}
+            ],
             success=True,
         )
 
@@ -322,7 +324,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         limit = arguments.get("limit", 100)
         records = await self._query_features(dataset_id, where, out_fields, limit)
         return ToolResult(
-            content=[{"type": "text", "text": self._format_query_results(records, limit)}],
+            content=[
+                {"type": "text", "text": self._format_query_results(records, limit)}
+            ],
             success=True,
         )
 
@@ -506,7 +510,6 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             self.plugin_config.trusted_service_hosts,
         )
         service_url = self._ensure_layer_url(service_url)
-        self._validate_feature_url(service_url, self.plugin_config.portal_url)
         query_url = f"{service_url}/query"
         record_count = min(limit, 1000)
         params = {
@@ -668,24 +671,6 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         if re.search(r"/(FeatureServer|MapServer)$", stripped, re.IGNORECASE):
             return f"{stripped}/0"
         return stripped
-
-    @staticmethod
-    def _validate_feature_url(service_url: str, portal_url: str) -> str:
-        parsed = urlparse(service_url)
-        portal_netloc = urlparse(portal_url).netloc
-
-        if parsed.scheme not in ("http", "https"):
-            raise ValueError(
-                f"Feature service URL has invalid scheme: {parsed.scheme!r}"
-            )
-
-        host = parsed.netloc.lower()
-        if not (host.endswith(".arcgis.com") or host == portal_netloc.lower()):
-            raise ValueError(
-                f"Feature service URL host {host!r} is not within allowed domains "
-                f"(*.arcgis.com or {portal_netloc})"
-            )
-        return service_url
 
     @staticmethod
     def _epoch_ms_to_iso(epoch_ms: Any) -> str:

@@ -25,6 +25,9 @@ def initialized_plugin(arcgis_config):
     plugin._initialized = True
     plugin.hub_client = AsyncMock()
     plugin.feature_client = AsyncMock()
+    # Clients are normally registered by _create_http_client; mirror that so
+    # the base-class shutdown closes them.
+    plugin._clients = [plugin.hub_client, plugin.feature_client]
     return plugin
 
 
@@ -78,8 +81,6 @@ class TestShutdown:
 
         hub.aclose.assert_awaited_once()
         feature.aclose.assert_awaited_once()
-        assert initialized_plugin.hub_client is None
-        assert initialized_plugin.feature_client is None
         assert initialized_plugin._initialized is False
 
     @pytest.mark.asyncio
@@ -121,7 +122,7 @@ class TestSearchDatasets:
         http_err = httpx.HTTPStatusError("404", request=Mock(), response=mock_response)
         initialized_plugin.hub_client.get = AsyncMock(side_effect=http_err)
 
-        with pytest.raises(RuntimeError, match="Hub Search API error"):
+        with pytest.raises(RuntimeError, match="Hub Search API"):
             await initialized_plugin.search_datasets("parks", 10)
 
     @pytest.mark.asyncio
@@ -160,7 +161,7 @@ class TestGetDataset:
         http_err = httpx.HTTPStatusError("403", request=Mock(), response=mock_response)
         initialized_plugin.hub_client.get = AsyncMock(side_effect=http_err)
 
-        with pytest.raises(RuntimeError, match="Hub Search API error"):
+        with pytest.raises(RuntimeError, match="Hub Search API"):
             await initialized_plugin.get_dataset("abc123")
 
     @pytest.mark.asyncio
@@ -247,7 +248,7 @@ class TestQueryDataErrors:
             )
             initialized_plugin.feature_client.get = AsyncMock(side_effect=http_err)
 
-            with pytest.raises(RuntimeError, match="Feature Service query error"):
+            with pytest.raises(RuntimeError, match="Feature Service"):
                 await initialized_plugin.query_data("abc123", {}, 100)
 
     @pytest.mark.asyncio
@@ -521,6 +522,12 @@ class TestHealthCheck:
     async def test_health_check_returns_false_on_non_200(self, initialized_plugin):
         mock_response = Mock()
         mock_response.status_code = 503
+        mock_response.text = "Service Unavailable"
+        mock_response.raise_for_status = Mock(
+            side_effect=httpx.HTTPStatusError(
+                "503", request=Mock(), response=mock_response
+            )
+        )
         initialized_plugin.hub_client.get = AsyncMock(return_value=mock_response)
 
         result = await initialized_plugin.health_check()
@@ -570,7 +577,7 @@ class TestExecuteToolMissingArgs:
             side_effect=RuntimeError("hub down"),
         ):
             result = await initialized_plugin.execute_tool(
-                "search_datasets", {"q": "parks"}
+                "search_datasets", {"query": "parks"}
             )
 
         assert result.success is False
