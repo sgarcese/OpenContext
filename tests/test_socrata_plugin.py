@@ -1225,3 +1225,38 @@ class TestMetadataEnrichment:
         assert result.success
         assert "Found 120 matching dataset(s)" in result.content[0]["text"]
         mock_search.assert_called_once_with({"q": "a", "limit": 1})
+
+
+class TestRedirectTokenScoping:
+    @pytest.fixture
+    def socrata_config(self):
+        return {
+            "base_url": "https://data.sfgov.org",
+            "portal_url": "https://data.sfgov.org",
+            "city_name": "SF",
+            "app_token": "test-app-token-123",
+        }
+
+    @pytest.mark.asyncio
+    async def test_soda_client_protects_app_token(self, socrata_config):
+        plugin = SocrataPlugin(socrata_config)
+        captured = {}
+
+        real = plugin._create_http_client
+
+        def spy(*args, **kwargs):
+            captured.setdefault("calls", []).append(kwargs)
+            return real(*args, **kwargs)
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            resp = Mock()
+            resp.json.return_value = {"results": []}
+            resp.raise_for_status = Mock()
+            mock_client.get = AsyncMock(return_value=resp)
+            mock_client_class.return_value = mock_client
+            plugin._create_http_client = spy
+            await plugin.initialize()
+
+        soda_kwargs = captured["calls"][-1]
+        assert soda_kwargs.get("protect_headers") == ("X-App-Token",)
