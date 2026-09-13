@@ -596,7 +596,9 @@ Use get_schema first for column names.""",
             if dataset_id != "unknown":
                 # Build the link from config + validated ID rather than echoing
                 # the portal-supplied permalink.
-                lines.append(f"   Portal: {self.plugin_config.portal_url}/d/{dataset_id}")
+                lines.append(
+                    f"   Portal: {self.plugin_config.portal_url}/d/{dataset_id}"
+                )
             lines.append("")
 
         return "\n".join(lines)
@@ -630,7 +632,9 @@ Use get_schema first for column names.""",
             lines.append("")
 
         if tags:
-            tag_text = join_cleaned(tags) if isinstance(tags, list) else self.portal_line(tags)
+            tag_text = (
+                join_cleaned(tags) if isinstance(tags, list) else self.portal_line(tags)
+            )
             lines.append(f"Tags: {tag_text}")
         if category:
             lines.append(f"Category: {category}")

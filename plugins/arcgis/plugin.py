@@ -733,10 +733,16 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
         for i, ds in enumerate(datasets, 1):
             tags = join_cleaned(ds.get("tags", [])) if ds.get("tags") else "None"
-            lines.append(f"{i}. {self.portal_line(ds.get('title'), default='Untitled')}")
+            lines.append(
+                f"{i}. {self.portal_line(ds.get('title'), default='Untitled')}"
+            )
             lines.append(f"   ID: {self.safe_id(ds.get('id'))}")
-            lines.append(f"   Type: {self.portal_line(ds.get('type'), default='unknown')}")
-            lines.append(f"   Access: {self.portal_line(ds.get('access'), default='unknown')}")
+            lines.append(
+                f"   Type: {self.portal_line(ds.get('type'), default='unknown')}"
+            )
+            lines.append(
+                f"   Access: {self.portal_line(ds.get('access'), default='unknown')}"
+            )
             lines.append(
                 f"   Description: {self.portal_line(ds.get('description'), max_len=300, default='No description')}"
             )

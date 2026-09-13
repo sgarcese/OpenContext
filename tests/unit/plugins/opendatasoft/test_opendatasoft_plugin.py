@@ -869,7 +869,10 @@ class TestListCategories:
         """Test the empty-categories message."""
         plugin, _ = _initialized_plugin(get_return={"facets": []})
         result = await plugin.execute_tool("list_categories", {})
-        assert "No categories found on Long Beach's open data portal." in result.content[0]["text"]
+        assert (
+            "No categories found on Long Beach's open data portal."
+            in result.content[0]["text"]
+        )
 
 
 class TestHealthCheck:

@@ -774,7 +774,9 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
 
         for i, dataset in enumerate(datasets, 1):
             meta = self._dataset_meta(dataset)
-            dataset_id = self.safe_id(dataset.get("dataset_id") or meta.get("dataset_id"))
+            dataset_id = self.safe_id(
+                dataset.get("dataset_id") or meta.get("dataset_id")
+            )
             title = self.portal_line(
                 meta.get("title") or dataset.get("title"), default="Untitled"
             )
@@ -788,7 +790,11 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
             lines.append(f"   ID: {dataset_id}")
             lines.append(f"   Description: {description}")
             if theme:
-                theme_text = join_cleaned(theme) if isinstance(theme, list) else self.portal_line(theme)
+                theme_text = (
+                    join_cleaned(theme)
+                    if isinstance(theme, list)
+                    else self.portal_line(theme)
+                )
                 lines.append(f"   Theme: {theme_text}")
             if records_count is not None:
                 lines.append(f"   Records: {self.portal_line(records_count)}")
@@ -804,8 +810,12 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         """Format dataset metadata for user display."""
         meta = self._dataset_meta(dataset)
         dataset_id = self.safe_id(dataset.get("dataset_id") or meta.get("dataset_id"))
-        title = self.portal_line(meta.get("title") or dataset.get("title"), default="Untitled")
-        description = self.portal_block(meta.get("description"), default="No description")
+        title = self.portal_line(
+            meta.get("title") or dataset.get("title"), default="Untitled"
+        )
+        description = self.portal_block(
+            meta.get("description"), default="No description"
+        )
         theme = meta.get("theme")
         keywords = meta.get("keyword")
         records_count = self.portal_line(meta.get("records_count"), default="N/A")
@@ -820,10 +830,18 @@ Supports: count(*), count(field), count(distinct field), sum(), avg(), min(), ma
         ]
 
         if theme:
-            theme_text = join_cleaned(theme) if isinstance(theme, list) else self.portal_line(theme)
+            theme_text = (
+                join_cleaned(theme)
+                if isinstance(theme, list)
+                else self.portal_line(theme)
+            )
             lines.append(f"Theme: {theme_text}")
         if keywords:
-            kw_text = join_cleaned(keywords) if isinstance(keywords, list) else self.portal_line(keywords)
+            kw_text = (
+                join_cleaned(keywords)
+                if isinstance(keywords, list)
+                else self.portal_line(keywords)
+            )
             lines.append(f"Keywords: {kw_text}")
 
         if dataset_id != "unknown":
