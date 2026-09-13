@@ -366,3 +366,87 @@ class TestBuildWhereClauseIdentifierValidation:
             {"status": "Open", "_count": 3, "n1": None}
         )
         assert clause == "status = 'Open' AND _count = 3 AND n1 IS NULL"
+
+
+class TestRedirectHeaderScoping:
+    """_create_http_client credential-header protection across redirects."""
+
+    @pytest.fixture
+    def plugin(self):
+        return _FakePlugin(
+            {"city_name": "TestCity", "base_url": "https://data.example.com"}
+        )
+
+    @pytest.mark.asyncio
+    async def test_protect_headers_forces_follow_redirects(self, plugin):
+        client = plugin._create_http_client(
+            base_url="https://data.example.com", protect_headers=("X-App-Token",)
+        )
+        assert client.follow_redirects is True
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_no_protect_headers_leaves_defaults(self, plugin):
+        client = plugin._create_http_client(base_url="https://data.example.com")
+        assert client.follow_redirects is False
+        assert not client._event_hooks.get("request")
+        await client.aclose()
+
+    async def _run_hook(self, client, url, header=("X-App-Token", "SECRET")):
+        hook = client._event_hooks["request"][0]
+        req = httpx.Request("GET", url, headers={header[0]: header[1]})
+        await hook(req)
+        return req
+
+    @pytest.mark.asyncio
+    async def test_header_kept_on_same_and_subdomain_host(self, plugin):
+        client = plugin._create_http_client(
+            base_url="https://data.example.com", protect_headers=("X-App-Token",)
+        )
+        for url in (
+            "https://data.example.com/api/x",
+            "https://cdn.data.example.com/api/x",  # subdomain of base host
+        ):
+            req = await self._run_hook(client, url)
+            assert req.headers.get("X-App-Token") == "SECRET"
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_header_dropped_on_untrusted_host(self, plugin, caplog):
+        client = plugin._create_http_client(
+            base_url="https://data.example.com", protect_headers=("X-App-Token",)
+        )
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="core.base_plugin"):
+            req = await self._run_hook(client, "https://evil.example.org/x")
+        assert "X-App-Token" not in req.headers
+        assert any("Dropping X-App-Token" in r.getMessage() for r in caplog.records)
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_renamed_domain_drops_credential(self, plugin):
+        # A legitimate rename (data.example.com -> example.gov) is
+        # indistinguishable from a hijack, so the credential is not forwarded;
+        # the request still follows through, just unauthenticated.
+        client = plugin._create_http_client(
+            base_url="https://data.example.com", protect_headers=("X-App-Token",)
+        )
+        req = await self._run_hook(client, "https://example.gov/x")
+        assert "X-App-Token" not in req.headers
+        await client.aclose()
+
+    @pytest.mark.asyncio
+    async def test_extra_trusted_hosts_retained(self, plugin):
+        client = plugin._create_http_client(
+            base_url="https://data.example.com",
+            protect_headers=("Authorization",),
+            trusted_hosts=("arcgis.com",),
+        )
+        req = await self._run_hook(
+            client,
+            "https://services.arcgis.com/x/FeatureServer/0",
+            header=("Authorization", "Bearer T"),
+        )
+        assert req.headers.get("Authorization") == "Bearer T"
+        await client.aclose()

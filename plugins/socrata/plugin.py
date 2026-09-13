@@ -57,19 +57,19 @@ class SocrataPlugin(BaseOpenDataPlugin):
                 timeout=self.plugin_config.timeout,
             )
 
+            # Socrata occasionally migrates a portal's domain (e.g.
+            # data.sfgov.org -> data.sf.gov) and 301s every path on the old
+            # one. Follow redirects so a portal_url that lags a rename keeps
+            # working (get_schema/get_dataset/query_dataset would otherwise
+            # fail on the redirect while search_datasets kept working via the
+            # Discovery API's domain aliasing). protect_headers drops the
+            # X-App-Token if a hop leaves the portal host, so the token is not
+            # handed to whoever now owns a lapsed domain.
             self.soda_client = self._create_http_client(
                 base_url=self.plugin_config.portal_url,
                 headers=headers,
                 timeout=self.plugin_config.timeout,
-                # Socrata occasionally migrates a portal's domain (e.g.
-                # data.sfgov.org -> data.sf.gov) and 301s every path on the
-                # old one. httpx defaults to not following redirects, which
-                # made get_schema/get_dataset/query_dataset fail on an HTML
-                # redirect body while search_datasets kept working (the
-                # Discovery API treats old/new domains as aliases). Follow
-                # redirects here so a portal_url that lags a rename still
-                # works, instead of failing silently for some tools only.
-                follow_redirects=True,
+                protect_headers=("X-App-Token",),
             )
 
             # Test connectivity via health check

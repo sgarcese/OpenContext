@@ -127,10 +127,13 @@ class OpendatasoftPlugin(BaseOpenDataPlugin):
             if self.plugin_config.api_key:
                 headers["Authorization"] = f"apikey {self.plugin_config.api_key}"
 
+            # Follow redirects so a renamed portal domain keeps working;
+            # protect_headers drops the api key if a hop leaves the base host.
             self.client = self._create_http_client(
                 base_url=f"{self.plugin_config.base_url}{EXPLORE_API_PATH}",
                 headers=headers,
                 timeout=self.plugin_config.timeout,
+                protect_headers=("Authorization",),
             )
 
             # Test connection with a minimal catalog request.
