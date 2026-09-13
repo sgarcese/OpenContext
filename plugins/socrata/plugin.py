@@ -61,6 +61,15 @@ class SocrataPlugin(BaseOpenDataPlugin):
                 base_url=self.plugin_config.portal_url,
                 headers=headers,
                 timeout=self.plugin_config.timeout,
+                # Socrata occasionally migrates a portal's domain (e.g.
+                # data.sfgov.org -> data.sf.gov) and 301s every path on the
+                # old one. httpx defaults to not following redirects, which
+                # made get_schema/get_dataset/query_dataset fail on an HTML
+                # redirect body while search_datasets kept working (the
+                # Discovery API treats old/new domains as aliases). Follow
+                # redirects here so a portal_url that lags a rename still
+                # works, instead of failing silently for some tools only.
+                follow_redirects=True,
             )
 
             # Test connectivity via health check
