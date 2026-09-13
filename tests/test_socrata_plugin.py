@@ -52,6 +52,32 @@ class TestPluginInitialization:
             assert mock_client.get.called
 
     @pytest.mark.asyncio
+    async def test_soda_client_follows_redirects(self, socrata_config):
+        """Test that the SODA client follows redirects.
+
+        Socrata occasionally migrates a portal's domain (e.g.
+        data.sfgov.org -> data.sf.gov) and 301s every path on the old one.
+        The SODA client must follow redirects so a configured portal_url
+        that lags a rename still works, instead of get_schema/get_dataset/
+        query_dataset failing on the HTML redirect body while
+        search_datasets keeps working via the Discovery API's domain
+        aliasing.
+        """
+        plugin = SocrataPlugin(socrata_config)
+
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(
+                return_value=self._mock_get_response({"results": []})
+            )
+            mock_client_class.return_value = mock_client
+
+            await plugin.initialize()
+
+            soda_call_kwargs = mock_client_class.call_args_list[-1].kwargs
+            assert soda_call_kwargs.get("follow_redirects") is True
+
+    @pytest.mark.asyncio
     async def test_plugin_initialization_fails_with_missing_app_token(
         self, socrata_config
     ):
