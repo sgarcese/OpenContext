@@ -19,6 +19,13 @@ IDs that the connector forwards to the portal. Defenses:
 - **Catalog filter whitelisting (CKAN)** (`_build_fq`) restricts `list_datasets`
   / `get_catalog_stats` filters to known Solr fields and quotes values as
   escaped Solr phrases, so model-supplied filter values cannot alter the query.
+- **Redirect credential scoping** (`_create_http_client(protect_headers=…)`)
+  follows redirects (so a renamed portal domain such as `data.sfgov.org` →
+  `data.sf.gov` keeps working) but strips the credential header (Socrata
+  `X-App-Token`, CKAN/ODS/ArcGIS `Authorization`) on any hop whose host is not
+  the configured portal/base host (or a trusted extra such as `*.arcgis.com`).
+  A lapsed domain can be re-registered by someone else, so the credential is
+  never forwarded to it; the request still follows through, unauthenticated.
 - **ArcGIS SSRF allow-list** (`_validate_feature_url`, `trusted_service_hosts`)
   stops a dataset record from steering Feature Service requests to arbitrary
   hosts.

@@ -185,10 +185,13 @@ class CKANPlugin(BaseOpenDataPlugin):
             if self.plugin_config.api_key:
                 headers["Authorization"] = self.plugin_config.api_key
 
+            # Follow redirects so a renamed portal domain keeps working;
+            # protect_headers drops the api key if a hop leaves the base host.
             self.client = self._create_http_client(
                 base_url=self.plugin_config.base_url,
                 headers=headers,
                 timeout=self.plugin_config.timeout,
+                protect_headers=("Authorization",),
             )
 
             # Test connection
