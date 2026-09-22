@@ -13,6 +13,9 @@ on:
     paths:
       - "terraform/**"
 
+permissions:
+  contents: read
+
 jobs:
   terraform-lint:
     name: Terraform lint & validate

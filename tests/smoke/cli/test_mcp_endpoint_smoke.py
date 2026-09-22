@@ -333,6 +333,5 @@ class TestTestCommandNoUrl:
         test(ctx=ctx, env="staging", url=None)
 
         assert mock_run.call_count == 2
-        urls_tested = [call[0][0] for call in mock_run.call_args_list]
-        assert "https://api.example.com" in urls_tested
-        assert "https://data.boston.gov" in urls_tested
+        urls_tested = {call[0][0] for call in mock_run.call_args_list}
+        assert urls_tested == {"https://api.example.com", "https://data.boston.gov"}
