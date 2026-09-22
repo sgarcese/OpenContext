@@ -4,6 +4,7 @@ This plugin provides access to ArcGIS Hub open data catalogs
 via the OGC API - Records (Hub Search API) and ArcGIS Feature Services.
 """
 
+import ipaddress
 import logging
 import re
 from typing import Any
@@ -18,6 +19,14 @@ from plugins.arcgis.config_schema import ArcGISPluginConfig
 from plugins.arcgis.where_validator import WhereValidator
 
 logger = logging.getLogger(__name__)
+
+# Feature Service URL shape accepted for auto-trust: an ArcGIS REST services
+# path ending in a FeatureServer/MapServer, optionally with a layer index.
+_ARCGIS_SERVICE_PATH = re.compile(
+    r"/rest/services/.+/(FeatureServer|MapServer)(/\d+)?/?$", re.IGNORECASE
+)
+# Hostname suffixes that are never valid public service hosts.
+_BLOCKED_HOST_SUFFIXES = (".local", ".localhost", ".internal", ".localdomain")
 
 
 class ArcGISPlugin(BaseOpenDataPlugin):
@@ -460,14 +469,25 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             service_url,
             self.plugin_config.portal_url,
             self.plugin_config.trusted_service_hosts,
+            auto_trust=self.plugin_config.auto_trust_hub_services,
         )
         service_url = self._ensure_layer_url(service_url)
         meta_url = f"{service_url}?f=json"
 
         response = await self._call_feature_service(meta_url, {})
 
-        data = response.json()
-        fields = data.get("fields", [])
+        fields = self._fields_from_layer_metadata(response)
+        if fields is None:
+            # Some self-hosted services return HTML or a malformed body on
+            # the layer metadata endpoint while the query endpoint works
+            # (seen on Columbus and Indianapolis). Derive the schema from a
+            # one-row query instead of failing.
+            logger.warning(
+                "Layer metadata at %s was not usable; deriving schema from a "
+                "1-row query",
+                meta_url,
+            )
+            fields = await self._schema_from_query(service_url)
         return [
             {
                 "name": f.get("name", ""),
@@ -476,6 +496,64 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             }
             for f in fields
         ]
+
+    @staticmethod
+    def _fields_from_layer_metadata(response: httpx.Response) -> list | None:
+        """Extract ``fields`` from a layer metadata response, or ``None``.
+
+        Returns ``None`` when the body is not JSON, carries an ArcGIS
+        ``error`` envelope, or has no ``fields`` list, so the caller can
+        fall back to deriving the schema from a query.
+        """
+        try:
+            data = response.json()
+        except Exception:  # noqa: BLE001 - any parse failure triggers fallback
+            return None
+        if not isinstance(data, dict) or data.get("error"):
+            return None
+        fields = data.get("fields")
+        return fields if isinstance(fields, list) else None
+
+    async def _schema_from_query(self, service_url: str) -> list[dict[str, Any]]:
+        """Derive a layer's field list from a one-row ``/query`` response.
+
+        Args:
+            service_url: Validated layer URL (``.../FeatureServer/<n>``).
+
+        Returns:
+            The ``fields`` list reported by the query endpoint.
+
+        Raises:
+            RuntimeError: If the query endpoint also fails to return usable
+                JSON, or reports an ArcGIS error.
+        """
+        params = {
+            "where": "1=1",
+            "outFields": "*",
+            "resultRecordCount": 1,
+            "returnGeometry": "false",
+            "f": "json",
+        }
+        response = await self._call_feature_service(f"{service_url}/query", params)
+        try:
+            data = response.json()
+        except Exception as json_err:
+            content_type = response.headers.get("content-type", "")
+            raise RuntimeError(
+                "Feature Service returned non-JSON responses on both the layer "
+                f"metadata and query endpoints (content-type: {content_type}); "
+                "the dataset URL may not point to a queryable ArcGIS Feature "
+                "Service."
+            ) from json_err
+        error_in_body = data.get("error") if isinstance(data, dict) else None
+        if error_in_body:
+            code = error_in_body.get("code", "unknown")
+            msg = error_in_body.get("message", "Unknown error")
+            raise RuntimeError(
+                f"Feature Service schema query failed (code {code}): {msg}"
+            )
+        fields = data.get("fields", []) if isinstance(data, dict) else []
+        return fields if isinstance(fields, list) else []
 
     async def query_data(
         self,
@@ -551,6 +629,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             service_url,
             self.plugin_config.portal_url,
             self.plugin_config.trusted_service_hosts,
+            auto_trust=self.plugin_config.auto_trust_hub_services,
         )
         service_url = self._ensure_layer_url(service_url)
         query_url = f"{service_url}/query"
@@ -656,6 +735,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         service_url: str,
         portal_url: str,
         trusted_hosts: tuple[str, ...] | list[str] = (),
+        *,
+        auto_trust: bool = False,
     ) -> str:
         """Restrict Feature Service URLs to trusted hosts.
 
@@ -667,8 +748,16 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         from thealphacubicle/OpenContext (Feature/security update #37).
 
         Hub catalogs commonly reference services self-hosted on city
-        domains; those hosts must be listed in the plugin's
-        ``trusted_service_hosts`` config to be queryable.
+        domains (``gis.charlottenc.gov``, ``maps2.dcgis.dc.gov``, ...).
+        With ``auto_trust`` (the ``auto_trust_hub_services`` config, on by
+        default) such a host is accepted when the URL is https, the host is
+        a public DNS name (not an IP literal, not a single label, not an
+        internal suffix), and the path is an ArcGIS REST service path
+        (``/rest/services/.../FeatureServer|MapServer[/<layer>]``). The
+        plugin never sends its bearer token to auto-trusted hosts (see
+        ``protect_headers`` in :meth:`initialize`). Operators who want a
+        strict allow-list set ``auto_trust_hub_services: false`` and list
+        hosts in ``trusted_service_hosts``.
 
         Args:
             service_url: Feature Service URL resolved from a dataset record.
@@ -676,14 +765,18 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                 fallback for self-hosted ArcGIS portals).
             trusted_hosts: Extra hostnames from ``trusted_service_hosts``
                 config.
+            auto_trust: Accept Hub-referenced ArcGIS service URLs on hosts
+                that are not explicitly listed (see above).
 
         Returns:
-            The validated ``service_url`` unchanged.
+            The validated ``service_url`` (surrounding whitespace stripped).
 
         Raises:
             ValueError: If the scheme is not http/https or the host is not
-                trusted.
+                trusted. The message starts with ``untrusted_service_host:``
+                and names the host so callers and agents can act on it.
         """
+        service_url = (service_url or "").strip()
         parsed = urlparse(service_url)
         if parsed.scheme not in ("http", "https"):
             raise ValueError(
@@ -699,11 +792,52 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             trusted = trusted.lower().lstrip(".")
             if host == trusted or host.endswith(f".{trusted}"):
                 return service_url
+
+        if auto_trust:
+            reason = ArcGISPlugin._auto_trust_refusal(parsed, host)
+            if reason is None:
+                logger.info(
+                    "Auto-trusting Hub-referenced Feature Service host %r "
+                    "(auto_trust_hub_services=true)",
+                    host,
+                )
+                return service_url
+            hint = f"auto-trust refused: {reason}; "
+        else:
+            hint = "auto_trust_hub_services is off; "
+
         raise ValueError(
-            f"Feature Service URL host {host!r} is not trusted "
-            f"(must end with '.arcgis.com', match portal host {portal_host!r}, "
-            f"or be listed in trusted_service_hosts)"
+            f"untrusted_service_host: {host!r} — Feature Service URL host is "
+            f"not trusted ({hint}must end with '.arcgis.com', match portal host "
+            f"{portal_host!r}, or be listed in trusted_service_hosts). Add "
+            f"{host!r} to trusted_service_hosts in config.yaml to allow it."
         )
+
+    @staticmethod
+    def _auto_trust_refusal(parsed: Any, host: str) -> str | None:
+        """Why a Hub-referenced service URL may not be auto-trusted, or None.
+
+        Args:
+            parsed: ``urlparse`` result for the service URL.
+            host: Lowercased hostname from the URL.
+
+        Returns:
+            A short reason string when the URL fails the auto-trust rules,
+            ``None`` when it qualifies.
+        """
+        if parsed.scheme != "https":
+            return "only https URLs qualify"
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            return "IP literals are never trusted"
+        if "." not in host or host.endswith(_BLOCKED_HOST_SUFFIXES):
+            return "host is not a public DNS name"
+        if not _ARCGIS_SERVICE_PATH.search(parsed.path or ""):
+            return "path is not an ArcGIS REST FeatureServer/MapServer path"
+        return None
 
     @staticmethod
     def _ensure_layer_url(service_url: str) -> str:

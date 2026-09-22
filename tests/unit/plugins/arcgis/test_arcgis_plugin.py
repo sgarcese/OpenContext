@@ -1234,3 +1234,225 @@ class TestMetadataEnrichment:
         assert summary["created"] == "2020-01-01"
         assert summary["modified"] == ""
         assert summary["recordCount"] == 3
+
+
+# ── auto-trust of Hub-referenced service hosts ─────────────────────────
+
+
+class TestAutoTrustHubServices:
+    PORTAL = "https://opendata.dc.gov"
+    SELF_HOSTED = "https://maps2.dcgis.dc.gov/dcgis/rest/services/DCGIS_DATA/Crime/FeatureServer/0"
+
+    def test_hub_referenced_https_service_is_accepted(self):
+        result = ArcGISPlugin._validate_feature_url(
+            self.SELF_HOSTED, self.PORTAL, auto_trust=True
+        )
+        assert result == self.SELF_HOSTED
+
+    def test_layer_index_optional_and_mapserver_accepted(self):
+        url = "https://gis.charlottenc.gov/arcgis/rest/services/ODP/Checkbook/MapServer"
+        assert (
+            ArcGISPlugin._validate_feature_url(url, self.PORTAL, auto_trust=True) == url
+        )
+
+    def test_surrounding_whitespace_is_stripped(self):
+        result = ArcGISPlugin._validate_feature_url(
+            f"  {self.SELF_HOSTED}\n", self.PORTAL, auto_trust=True
+        )
+        assert result == self.SELF_HOSTED
+
+    def test_off_by_default_for_static_calls(self):
+        with pytest.raises(
+            ValueError, match="untrusted_service_host: 'maps2.dcgis.dc.gov'"
+        ):
+            ArcGISPlugin._validate_feature_url(self.SELF_HOSTED, self.PORTAL)
+
+    @pytest.mark.parametrize(
+        "url,reason",
+        [
+            (
+                "http://maps2.dcgis.dc.gov/dcgis/rest/services/X/FeatureServer/0",
+                "only https",
+            ),
+            (
+                "https://169.254.169.254/rest/services/X/FeatureServer/0",
+                "IP literals",
+            ),
+            ("https://[::1]/rest/services/X/FeatureServer/0", "IP literals"),
+            ("https://gis/rest/services/X/FeatureServer/0", "public DNS name"),
+            (
+                "https://gis.corp.internal/rest/services/X/FeatureServer/0",
+                "public DNS name",
+            ),
+            ("https://evil.example.com/admin", "not an ArcGIS REST"),
+            (
+                "https://evil.example.com/rest/services/X/FeatureServer/0/query?x=1",
+                "not an ArcGIS REST",
+            ),
+        ],
+    )
+    def test_auto_trust_refusals_are_structured(self, url, reason):
+        with pytest.raises(ValueError) as exc:
+            ArcGISPlugin._validate_feature_url(url, self.PORTAL, auto_trust=True)
+        msg = str(exc.value)
+        assert msg.startswith("untrusted_service_host: ")
+        assert "not trusted" in msg
+        assert reason in msg
+
+    def test_explicit_allow_list_still_wins_over_auto_trust_rules(self):
+        # An operator may deliberately trust an http-only service host.
+        url = "http://gis.example.gov/arcgis/rest/services/X/FeatureServer/0"
+        assert (
+            ArcGISPlugin._validate_feature_url(
+                url, self.PORTAL, ["gis.example.gov"], auto_trust=True
+            )
+            == url
+        )
+
+    def test_plugin_config_default_enables_auto_trust(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        assert plugin.plugin_config.auto_trust_hub_services is True
+
+    @pytest.mark.asyncio
+    async def test_query_data_auto_trusts_hub_referenced_host(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.feature_client = AsyncMock()
+        plugin._initialized = True
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={
+                "id": "abc",
+                "type": "Feature Layer",
+                "service_url": self.SELF_HOSTED,
+            },
+        ):
+            resp = Mock()
+            resp.raise_for_status = Mock()
+            resp.json.return_value = {"features": [{"attributes": {"a": 1}}]}
+            plugin.feature_client.get = AsyncMock(return_value=resp)
+            rows = await plugin._query_features("abc", "1=1", "*", 10)
+        assert rows == [{"a": 1}]
+        called_url = plugin.feature_client.get.call_args[0][0]
+        assert called_url == f"{self.SELF_HOSTED}/query"
+
+    @pytest.mark.asyncio
+    async def test_query_data_respects_auto_trust_off(self, arcgis_config):
+        cfg = dict(arcgis_config)
+        cfg["auto_trust_hub_services"] = False
+        plugin = ArcGISPlugin(cfg)
+        plugin.feature_client = AsyncMock()
+        plugin._initialized = True
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={
+                "id": "abc",
+                "type": "Feature Layer",
+                "service_url": self.SELF_HOSTED,
+            },
+        ):
+            with pytest.raises(ValueError, match="untrusted_service_host"):
+                await plugin._query_features("abc", "1=1", "*", 10)
+        plugin.feature_client.get.assert_not_called()
+
+
+# ── get_schema fallback when layer metadata is unusable ────────────────
+
+
+class TestGetSchemaFallback:
+    SERVICE = (
+        "https://services.arcgis.com/abc/arcgis/rest/services/Crime/FeatureServer/0"
+    )
+
+    def _plugin(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.feature_client = AsyncMock()
+        plugin._initialized = True
+        return plugin
+
+    @staticmethod
+    def _resp(json_value=None, *, raises=False, content_type="application/json"):
+        resp = Mock()
+        resp.raise_for_status = Mock()
+        resp.headers = {"content-type": content_type}
+        if raises:
+            resp.json.side_effect = ValueError("not json")
+        else:
+            resp.json.return_value = json_value
+        return resp
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_one_row_query_on_non_json_metadata(
+        self, arcgis_config
+    ):
+        plugin = self._plugin(arcgis_config)
+        meta = self._resp(raises=True, content_type="text/html")
+        query = self._resp(
+            {
+                "fields": [
+                    {"name": "OBJECTID", "type": "esriFieldTypeOID", "alias": "ID"}
+                ],
+                "features": [{"attributes": {"OBJECTID": 1}}],
+            }
+        )
+        plugin.feature_client.get = AsyncMock(side_effect=[meta, query])
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={"id": "abc", "service_url": self.SERVICE},
+        ):
+            fields = await plugin.get_schema("abc")
+        assert fields == [
+            {"name": "OBJECTID", "type": "esriFieldTypeOID", "alias": "ID"}
+        ]
+        second_call = plugin.feature_client.get.call_args_list[1]
+        assert second_call[0][0] == f"{self.SERVICE}/query"
+        assert second_call[1]["params"]["resultRecordCount"] == 1
+
+    @pytest.mark.asyncio
+    async def test_falls_back_when_metadata_carries_arcgis_error(self, arcgis_config):
+        plugin = self._plugin(arcgis_config)
+        meta = self._resp({"error": {"code": 500, "message": "boom"}})
+        query = self._resp({"fields": [{"name": "a", "type": "t", "alias": "A"}]})
+        plugin.feature_client.get = AsyncMock(side_effect=[meta, query])
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={"id": "abc", "service_url": self.SERVICE},
+        ):
+            fields = await plugin.get_schema("abc")
+        assert fields == [{"name": "a", "type": "t", "alias": "A"}]
+
+    @pytest.mark.asyncio
+    async def test_no_fallback_when_metadata_is_fine(self, arcgis_config):
+        plugin = self._plugin(arcgis_config)
+        meta = self._resp({"fields": [{"name": "a", "type": "t", "alias": "A"}]})
+        plugin.feature_client.get = AsyncMock(return_value=meta)
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={"id": "abc", "service_url": self.SERVICE},
+        ):
+            await plugin.get_schema("abc")
+        assert plugin.feature_client.get.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_both_endpoints_unusable_raises_runtime_error(self, arcgis_config):
+        plugin = self._plugin(arcgis_config)
+        meta = self._resp(raises=True, content_type="text/html")
+        query = self._resp(raises=True, content_type="text/html")
+        plugin.feature_client.get = AsyncMock(side_effect=[meta, query])
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={"id": "abc", "service_url": self.SERVICE},
+        ):
+            with pytest.raises(RuntimeError, match="both the layer metadata and query"):
+                await plugin.get_schema("abc")

@@ -178,6 +178,8 @@ plugins:
     city_name: "Your City"
     timeout: 120
     token: "${ARCGIS_TOKEN}"  # Optional: bearer token for private items
+    # trusted_service_hosts: ["maps2.dcgis.dc.gov"]  # explicit extra hosts
+    # auto_trust_hub_services: true  # accept Hub-referenced service URLs (default)
 ```
 
 **Tools:**

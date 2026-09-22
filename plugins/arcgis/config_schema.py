@@ -32,6 +32,19 @@ class ArcGISPluginConfig(BasePluginConfig):
         ),
     )
 
+    auto_trust_hub_services: bool = Field(
+        default=True,
+        description=(
+            "Trust Feature Service URLs that the configured Hub itself "
+            "references in its item metadata, without listing each host in "
+            "trusted_service_hosts. Only https URLs with an ArcGIS REST path "
+            "(/rest/services/.../FeatureServer|MapServer) on a public hostname "
+            "qualify; IP literals and internal names are always refused, and "
+            "the bearer token is never sent to auto-trusted hosts. Set to "
+            "false to require an explicit allow-list."
+        ),
+    )
+
     # Preserve the historical ArcGIS default of 120 seconds (the base default
     # is 30.0); widen the bound so existing configs that used 120 still
     # validate.
