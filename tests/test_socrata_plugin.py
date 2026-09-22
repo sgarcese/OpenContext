@@ -78,23 +78,33 @@ class TestPluginInitialization:
             assert soda_call_kwargs.get("follow_redirects") is True
 
     @pytest.mark.asyncio
-    async def test_plugin_initialization_fails_with_missing_app_token(
-        self, socrata_config
+    @pytest.mark.parametrize("token_value", [None, "", "   "])
+    async def test_plugin_runs_without_app_token_and_sends_no_header(
+        self, socrata_config, token_value
     ):
-        """Test that plugin initialization fails when app token is missing."""
-        del socrata_config["app_token"]
-        # Config schema will raise on validation - we need invalid config
-        with pytest.raises(Exception):
-            SocrataPlugin(socrata_config)
+        """An app token is optional: portals such as data.cdc.gov serve untokened
+        requests but reject an invalid token (403), so a missing/blank token must
+        mean "send no X-App-Token header", not "refuse to start"."""
+        if token_value is None:
+            del socrata_config["app_token"]
+        else:
+            socrata_config["app_token"] = token_value
+        plugin = SocrataPlugin(socrata_config)
+        assert plugin.plugin_config.app_token is None
 
-    @pytest.mark.asyncio
-    async def test_plugin_initialization_fails_with_empty_app_token(
-        self, socrata_config
-    ):
-        """Test that plugin initialization fails when app token is empty."""
-        socrata_config["app_token"] = ""
-        with pytest.raises(Exception):
-            SocrataPlugin(socrata_config)
+        with patch("httpx.AsyncClient") as mock_client_class:
+            mock_client = AsyncMock()
+            mock_client.get = AsyncMock(
+                return_value=self._mock_get_response({"results": []})
+            )
+            mock_client_class.return_value = mock_client
+
+            await plugin.initialize()
+
+            assert mock_client_class.call_count == 2
+            for call in mock_client_class.call_args_list:
+                headers = call[1].get("headers") or {}
+                assert "X-App-Token" not in headers
 
     @pytest.mark.asyncio
     async def test_plugin_initialization_includes_app_token_header(
