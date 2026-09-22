@@ -489,14 +489,23 @@ class TestGetSchema:
             },
         ):
             plugin.feature_client = AsyncMock()
+            # first call: service description (no layers listed -> layer 0);
+            # second call: the layer metadata
             plugin.feature_client.get = AsyncMock(
-                return_value=_mock_response({"fields": []})
+                side_effect=[
+                    _mock_response({"layers": []}),
+                    _mock_response({"fields": []}),
+                ]
             )
 
             await plugin.get_schema("abc123")
 
-        url_called = plugin.feature_client.get.call_args[0][0]
-        assert "/FeatureServer/0?f=json" in url_called
+        url_called, kwargs = (
+            plugin.feature_client.get.call_args[0][0],
+            plugin.feature_client.get.call_args[1],
+        )
+        assert url_called.endswith("/FeatureServer/0")
+        assert kwargs["params"] == {"f": "json"}
 
     @pytest.mark.asyncio
     async def test_get_schema_no_service_url_raises(self, arcgis_config):
@@ -1443,7 +1452,7 @@ class TestGetSchemaFallback:
         assert plugin.feature_client.get.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_both_endpoints_unusable_raises_runtime_error(self, arcgis_config):
+    async def test_both_endpoints_unusable_raises_value_error(self, arcgis_config):
         plugin = self._plugin(arcgis_config)
         meta = self._resp(raises=True, content_type="text/html")
         query = self._resp(raises=True, content_type="text/html")
@@ -1454,5 +1463,136 @@ class TestGetSchemaFallback:
             new_callable=AsyncMock,
             return_value={"id": "abc", "service_url": self.SERVICE},
         ):
-            with pytest.raises(RuntimeError, match="both the layer metadata and query"):
+            with pytest.raises(ValueError, match="both the layer metadata and query"):
                 await plugin.get_schema("abc")
+
+
+# ── get_schema / layer resolution (Feature Service) ───────────────────
+
+FS = "https://services.arcgis.com/abc/arcgis/rest/services/Parks/FeatureServer"
+
+
+class TestSchemaAndLayerResolution:
+    """Regressions found against HUD's Hub (hudgis-hud.opendata.arcgis.com), 2026-09-20."""
+
+    @pytest.mark.asyncio
+    async def test_get_schema_sends_f_json_as_a_param_and_parses_fields(
+        self, arcgis_config
+    ):
+        """`get_schema` used to build `{url}/0?f=json` and pass `params={}`; httpx
+        replaces the URL query with the (empty) params, ArcGIS answers HTML, and
+        `.json()` fails on every dataset. The format must travel as a query
+        parameter."""
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.feature_client = AsyncMock()
+        plugin.feature_client.get = AsyncMock(
+            return_value=_mock_response(
+                {
+                    "id": 0,
+                    "fields": [
+                        {
+                            "name": "GEOID",
+                            "type": "esriFieldTypeString",
+                            "alias": "GEOID",
+                        }
+                    ],
+                }
+            )
+        )
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={"service_url": f"{FS}/0"},
+        ):
+            fields = await plugin.get_schema("abc123")
+
+        assert fields == [
+            {"name": "GEOID", "type": "esriFieldTypeString", "alias": "GEOID"}
+        ]
+        url, kwargs = (
+            plugin.feature_client.get.call_args[0][0],
+            plugin.feature_client.get.call_args[1],
+        )
+        assert "?" not in url
+        assert kwargs["params"]["f"] == "json"
+
+    @pytest.mark.asyncio
+    async def test_resolve_layer_url_uses_the_services_first_layer_id(
+        self, arcgis_config
+    ):
+        """A service whose only layer is id 4 (HUD Low-Mod Income by Tract) or 13
+        (Opportunity Zones) must not be queried at `/0`."""
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.feature_client = AsyncMock()
+        plugin.feature_client.get = AsyncMock(
+            return_value=_mock_response(
+                {"layers": [{"id": 4, "name": "Tracts"}], "tables": []}
+            )
+        )
+        assert await plugin._resolve_layer_url(FS) == f"{FS}/4"
+        url, kwargs = (
+            plugin.feature_client.get.call_args[0][0],
+            plugin.feature_client.get.call_args[1],
+        )
+        assert url == FS
+        assert kwargs["params"]["f"] == "json"
+
+    @pytest.mark.asyncio
+    async def test_resolve_layer_url_falls_back_to_a_table_then_to_zero(
+        self, arcgis_config
+    ):
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.feature_client = AsyncMock()
+        plugin.feature_client.get = AsyncMock(
+            return_value=_mock_response(
+                {"layers": [], "tables": [{"id": 1, "name": "SAFMR"}]}
+            )
+        )
+        assert await plugin._resolve_layer_url(FS) == f"{FS}/1"
+
+        other = FS.replace("Parks", "Other")
+        plugin.feature_client.get = AsyncMock(side_effect=RuntimeError("boom"))
+        assert await plugin._resolve_layer_url(other) == f"{other}/0"
+
+    @pytest.mark.asyncio
+    async def test_resolve_layer_url_keeps_an_explicit_layer_and_caches(
+        self, arcgis_config
+    ):
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.feature_client = AsyncMock()
+        plugin.feature_client.get = AsyncMock(
+            return_value=_mock_response({"layers": [{"id": 13, "name": "OZ"}]})
+        )
+        assert await plugin._resolve_layer_url(f"{FS}/2") == f"{FS}/2"
+        plugin.feature_client.get.assert_not_called()
+
+        assert await plugin._resolve_layer_url(FS) == f"{FS}/13"
+        assert await plugin._resolve_layer_url(FS) == f"{FS}/13"
+        assert plugin.feature_client.get.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_query_features_queries_the_resolved_layer(self, arcgis_config):
+        plugin = ArcGISPlugin(arcgis_config)
+        plugin.feature_client = AsyncMock()
+        plugin.feature_client.get = AsyncMock(
+            side_effect=[
+                _mock_response({"layers": [{"id": 4, "name": "Tracts"}]}),
+                _mock_response(
+                    {"features": [{"attributes": {"GEOID": "08031000800"}}]}
+                ),
+            ]
+        )
+        with patch.object(
+            plugin,
+            "get_dataset",
+            new_callable=AsyncMock,
+            return_value={"service_url": FS, "type": "Feature Service"},
+        ):
+            rows = await plugin._query_features(
+                "abc123", "GEOID='08031000800'", "GEOID", 5
+            )
+
+        assert rows == [{"GEOID": "08031000800"}]
+        query_url = plugin.feature_client.get.call_args_list[1][0][0]
+        assert query_url == f"{FS}/4/query"

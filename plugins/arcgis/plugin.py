@@ -55,6 +55,11 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         "Table",
     }
 
+    def __init__(self, config: dict[str, Any]) -> None:
+        super().__init__(config)
+        # service root URL -> resolved layer URL (see _resolve_layer_url)
+        self._layer_url_cache: dict[str, str] = {}
+
     async def initialize(self) -> bool:
         """Initialize ArcGIS Hub plugin and test connection.
 
@@ -471,10 +476,13 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             self.plugin_config.trusted_service_hosts,
             auto_trust=self.plugin_config.auto_trust_hub_services,
         )
-        service_url = self._ensure_layer_url(service_url)
-        meta_url = f"{service_url}?f=json"
+        layer_url = await self._resolve_layer_url(service_url)
 
-        response = await self._call_feature_service(meta_url, {})
+        # The format must travel as a query parameter: httpx replaces the
+        # URL's own query string with ``params``, so ``{url}?f=json`` plus
+        # ``params={}`` sent a bare request and ArcGIS answered with an HTML
+        # page ("Expecting value: line 1 column 1" on every dataset).
+        response = await self._call_feature_service(layer_url, {"f": "json"})
 
         fields = self._fields_from_layer_metadata(response)
         if fields is None:
@@ -485,9 +493,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             logger.warning(
                 "Layer metadata at %s was not usable; deriving schema from a "
                 "1-row query",
-                meta_url,
+                layer_url,
             )
-            fields = await self._schema_from_query(service_url)
+            fields = await self._schema_from_query(layer_url)
         return [
             {
                 "name": f.get("name", ""),
@@ -524,8 +532,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             The ``fields`` list reported by the query endpoint.
 
         Raises:
-            RuntimeError: If the query endpoint also fails to return usable
-                JSON, or reports an ArcGIS error.
+            ValueError: If the query endpoint also fails to return usable JSON.
+            RuntimeError: If the query endpoint reports an ArcGIS error.
         """
         params = {
             "where": "1=1",
@@ -539,7 +547,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             data = response.json()
         except Exception as json_err:
             content_type = response.headers.get("content-type", "")
-            raise RuntimeError(
+            raise ValueError(
                 "Feature Service returned non-JSON responses on both the layer "
                 f"metadata and query endpoints (content-type: {content_type}); "
                 "the dataset URL may not point to a queryable ArcGIS Feature "
@@ -631,7 +639,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             self.plugin_config.trusted_service_hosts,
             auto_trust=self.plugin_config.auto_trust_hub_services,
         )
-        service_url = self._ensure_layer_url(service_url)
+        service_url = await self._resolve_layer_url(service_url)
         query_url = f"{service_url}/query"
         record_count = min(limit, 1000)
         params = {
@@ -839,10 +847,54 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             return "path is not an ArcGIS REST FeatureServer/MapServer path"
         return None
 
+    async def _resolve_layer_url(self, service_url: str) -> str:
+        """Return the layer URL to query for a service URL.
+
+        A URL that already names a layer (``.../FeatureServer/4``) is
+        returned as is. For a service root, the service description
+        (``?f=json``) is read and the first layer's id is used, falling back
+        to the first table, then to ``0``. Services whose only layer is not
+        id 0 (HUD's "Low to Moderate Income Population by Tract" is layer 4,
+        "Opportunity Zones" is layer 13) were unreachable when ``/0`` was
+        assumed. Results are cached per service URL.
+
+        Args:
+            service_url: Validated Feature Service or layer URL.
+
+        Returns:
+            A layer URL (``.../FeatureServer/<id>``).
+        """
+        stripped = service_url.rstrip("/")
+        if not re.search(r"/(FeatureServer|MapServer)$", stripped, re.IGNORECASE):
+            return stripped
+
+        cached = self._layer_url_cache.get(stripped)
+        if cached is not None:
+            return cached
+
+        layer_id = 0
+        try:
+            response = await self._call_feature_service(stripped, {"f": "json"})
+            data = response.json() or {}
+            candidates = list(data.get("layers") or []) + list(data.get("tables") or [])
+            first = next((c for c in candidates if isinstance(c.get("id"), int)), None)
+            if first is not None:
+                layer_id = int(first["id"])
+        except Exception as exc:  # noqa: BLE001 - metadata unreachable: keep default
+            logger.warning(
+                "Could not read layer list for %s (%s); assuming layer 0", stripped, exc
+            )
+
+        resolved = f"{stripped}/{layer_id}"
+        self._layer_url_cache[stripped] = resolved
+        return resolved
+
     @staticmethod
     def _ensure_layer_url(service_url: str) -> str:
         """Append /0 if the URL points at a FeatureServer or MapServer root
         without a layer index (e.g. .../FeatureServer -> .../FeatureServer/0).
+        Kept for callers that cannot await; :meth:`_resolve_layer_url` is
+        preferred.
         """
         stripped = service_url.rstrip("/")
         if re.search(r"/(FeatureServer|MapServer)$", stripped, re.IGNORECASE):

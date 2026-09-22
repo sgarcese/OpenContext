@@ -204,7 +204,7 @@ plugins:
     base_url: "https://data.yourcity.gov"
     portal_url: "https://data.yourcity.gov"
     city_name: "Your City"
-    app_token: "${SOCRATA_APP_TOKEN}"  # Recommended; register at dev.socrata.com
+    app_token: "${SOCRATA_APP_TOKEN}"  # Optional (recommended); register at dev.socrata.com
     timeout: 30
 ```
 
