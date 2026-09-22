@@ -1,10 +1,22 @@
 # Built-in Plugins Reference
 
-OpenContext includes built-in plugins for CKAN, Socrata, ArcGIS Hub, and Opendatasoft open data portals.
+OpenContext includes built-in plugins for CKAN, ArcGIS Hub, Socrata, and Opendatasoft open data portals.
+
+| Portal Software | Example Cities / Portals      | Plugin                             |
+| --------------- | ----------------------------- | ---------------------------------- |
+| CKAN            | Boston, data.gov, data.gov.uk | `ckan`                             |
+| ArcGIS Hub      | Washington DC, hub.arcgis.com | `arcgis`                           |
+| Socrata         | Chicago, NYC, Seattle         | `socrata`                          |
+| Opendatasoft    | Long Beach, public.opendatasoft.com | `opendatasoft`               |
+| Other           | Any custom API or database    | [Custom plugin](CUSTOM_PLUGINS.md) |
+
+Not sure which plugin to use? Check your portal's URL or "About" page, or look for the platform logo.
+
+---
 
 ## CKAN Plugin
 
-For CKAN-based open data portals (e.g., data.boston.gov, data.gov, data.gov.uk).
+For CKAN-based open data portals (e.g., data.gov, data.gov.uk).
 
 ### Configuration
 
@@ -12,66 +24,107 @@ For CKAN-based open data portals (e.g., data.boston.gov, data.gov, data.gov.uk).
 plugins:
   ckan:
     enabled: true
-    base_url: "https://data.yourcity.gov"       # CKAN API base URL
-    portal_url: "https://data.yourcity.gov"     # Public portal URL
-    city_name: "Your City"                      # City/organization name
-    timeout: 120                                # HTTP timeout in seconds
-    api_key: "${CKAN_API_KEY}"                  # Optional: API key
+    base_url: "https://data.yourcity.gov" # CKAN API base URL
+    portal_url: "https://data.yourcity.gov" # Public portal URL
+    city_name: "Your City" # City/organization name
+    timeout: 120 # HTTP timeout in seconds
+    api_key: "${CKAN_API_KEY}" # Optional: API key
 ```
 
 ### Tools
 
-- `ckan__search_datasets(query, limit)` - Free-text search; header reports the catalog-wide match count
-- `ckan__list_datasets(query, organization, tag, format, license, group, sort, limit, offset)` - Browse the catalog with exact-match filters, sorting (default: most recently modified first) and paging; returns the total count plus organization, modified date, resource count and formats per dataset
-- `ckan__get_catalog_stats(facets, query, organization, tag, format, license, group, limit)` - Count public datasets overall and per organization / tag / resource format / license / group (from the portal search index); values it returns are the exact filter values `list_datasets` accepts
-- `ckan__get_dataset(dataset_id, max_resources)` - Full dataset metadata: organization (title + slug), license, created/modified dates, tags, groups, and every resource with ID, format, created/modified dates, size, DataStore flag, download URL and description. Datasets split by year expose one resource per year, so resource names/dates/URLs date each slice. `max_resources` defaults to 50 (max 500)
-- `ckan__query_data(resource_id, filters, limit)` - Query data from a resource
-- `ckan__get_schema(resource_id)` - Get schema for a resource
-- `ckan__execute_sql(sql)` - Execute a validated `SELECT` query against the datastore
-- `ckan__aggregate_data(resource_id, metrics, group_by, filters, having, order_by, limit)` - GROUP BY aggregations without writing SQL
+| Tool                                                                                     | Description                                                                                        |
+| ---------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `ckan__search_datasets(query, limit)`                                                    | Free-text search; the header reports the catalog-wide match count                                  |
+| `ckan__list_datasets(query, organization, tag, format, license, group, sort, limit, offset)` | Browse the catalog with exact-match filters, sorting (default: most recently modified) and paging |
+| `ckan__get_catalog_stats(facets, query, organization, tag, format, license, group, limit)` | Dataset counts overall and per organization / tag / format / license / group                    |
+| `ckan__get_dataset(dataset_id, max_resources)`                                           | Full metadata: organization, license, created/modified dates, tags, groups, and every resource with format, dates, size and download URL |
+| `ckan__query_data(resource_id, filters, limit)`                                          | Query data from a resource                                                                         |
+| `ckan__get_schema(resource_id)`                                                          | Get schema for a resource                                                                          |
+| `ckan__execute_sql(sql)`                                                                 | Execute PostgreSQL SELECT queries (advanced)                                                       |
+| `ckan__aggregate_data(resource_id, metrics, group_by, filters, having, order_by, limit)` | Aggregate data with GROUP BY — supports `count(*)`, `sum()`, `avg()`, `min()`, `max()`, `stddev()` |
 
-**`aggregate_data` notes:**
-- `metrics` maps alias to expression, e.g. `{"cnt": "count(*)", "avg_amt": "avg(amount)"}`. Supported: `count(*)`, `count(field)`, `count(distinct field)`, `sum()`, `avg()`, `min()`, `max()`, `stddev()`, `variance()`
-- `having` keys are aggregate expressions or declared metric aliases; string values may carry a comparison operator (`{"count(*)": ">= 5"}`), bare numbers default to `>`
-- `order_by` accepts `"field"`, `"-field"` (descending), or `"field ASC|DESC"`
-- All identifiers and expressions are validated against safe whitelists before SQL is built
+### SQL Execution
 
-**Catalog browsing notes:**
-- `list_datasets` / `get_catalog_stats` filters are exact matches on CKAN's search index (Solr). Filter names are whitelisted and values are quoted/escaped as Solr phrases, so operators and wildcards in values are inert
-- Resource download URLs are shown verbatim only when their host is the portal's own host (or a subdomain); other hosts render as `(external: hostname)`
-- Counts cover public datasets only (private/draft datasets are not in the search index)
+The `execute_sql` tool allows complex PostgreSQL queries (CTEs, window functions, joins). Only SELECT is allowed — INSERT, UPDATE, DELETE, DROP, and other destructive operations are blocked. Resource IDs must be valid UUIDs in double quotes: `FROM "uuid-here"`.
 
-### Examples
-
-**Search datasets:**
-```
-Search for datasets about housing in Boston
-```
-
-**Get dataset:**
-```
-Get details about the "311 Service Requests" dataset
-```
-
-**Query data:**
-```
-Query the first 10 records from resource abc123
-```
-
-## CKAN API
+### CKAN API
 
 This plugin uses CKAN's Action API:
+
 - `/api/3/action/package_search` - Search datasets
 - `/api/3/action/package_show` - Get dataset
 - `/api/3/action/datastore_search` - Query data
 
 See [CKAN API documentation](https://docs.ckan.org/en/latest/api/) for details.
 
+---
+
+## ArcGIS Hub Plugin
+
+For ArcGIS Hub open data portals (e.g., hub.arcgis.com, data-yourcity.hub.arcgis.com).
+
+### Configuration
+
+```yaml
+plugins:
+  arcgis:
+    enabled: true
+    portal_url: "https://hub.arcgis.com" # ArcGIS Hub portal URL
+    city_name: "Your City" # City/organization name
+    timeout: 120 # HTTP timeout in seconds
+    token: "${ARCGIS_TOKEN}" # Optional: bearer token for private items
+```
+
+### Tools
+
+| Tool                                                       | Description                                        |
+| ---------------------------------------------------------- | -------------------------------------------------- |
+| `arcgis__search_datasets(q, limit)`                        | Search the Hub catalog                             |
+| `arcgis__get_dataset(dataset_id)`                          | Get metadata for a Hub item (32-char hex ID)       |
+| `arcgis__get_aggregations(field, q)`                       | Facet counts for type, tags, categories, or access |
+| `arcgis__query_data(dataset_id, where, out_fields, limit)` | Query a Feature Service                            |
+
+### Usage Notes
+
+- `get_dataset` returns the Hub item metadata. Check that the item has a queryable `serviceUrl` before calling `query_data`.
+- `get_aggregations` accepts `field` values: `"type"`, `"tags"`, `"categories"`, `"access"`. This is a catalog-level tool, not a DataPlugin method — it has no equivalent in other plugins.
+- `query_data` uses the ArcGIS Feature Service query interface. The `where` parameter is a SQL WHERE clause (e.g., `"population > 10000"`). Only Feature Layer, Feature Service, Map Service, and Table types are queryable.
+
+### Implementation Notes
+
+**Two-hop resolution.** `query_data` first fetches the dataset metadata via `get_dataset` to resolve the Feature Service URL, then queries the Feature Service directly. Always call `get_dataset` first and check the `service_url` field is non-empty before calling `query_data`.
+
+**WHERE clause validation.** The `where` parameter is validated by `WhereValidator` before being sent to the Feature Service. Malformed SQL WHERE clauses are rejected before the network call.
+
+**Feature Service host restriction.** For security, Feature Service URLs are restricted to `*.arcgis.com` or the `portal_url` domain configured in `config.yaml`. The plugin validates the URL's host against this allowlist before querying the service.
+
+**Auto layer index.** If the dataset's service URL points at a `FeatureServer` or `MapServer` root without a layer index (e.g. `.../FeatureServer`), the plugin automatically appends `/0` to target the default layer.
+
+**Queryable item types.** `query_data` only works on the following ArcGIS item types:
+
+| Item Type                | Queryable                 |
+| ------------------------ | ------------------------- |
+| Feature Layer            | Yes                       |
+| Feature Service          | Yes                       |
+| Map Service              | Yes                       |
+| Table                    | Yes                       |
+| Web Map, Dashboard, etc. | No — raises a clear error |
+
+### ArcGIS API
+
+This plugin uses two API layers:
+
+- **Hub Search API** (OGC API - Records) — catalog search and aggregations
+- **ArcGIS Feature Service** query endpoint — data queries
+
+---
+
 ## Socrata Plugin
 
 For Socrata-based open data portals (e.g., data.cityofchicago.org, data.cityofnewyork.us, data.seattle.gov).
 
-**Note:** Socrata requires a free App Token. Register at [https://dev.socrata.com/register](https://dev.socrata.com/register), or generate one from a portal's *Developer Settings → App Tokens*.
+**Note:** A Socrata App Token is **required**. Register for a free token at [https://dev.socrata.com/register](https://dev.socrata.com/register), or generate one from a portal's *Developer Settings → App Tokens*.
 
 **Careful — App Token vs. API Key:** Socrata's developer console also offers a separate "API Key" credential (*Developer Settings → API Keys*), which issues a **Key ID + Key Secret pair** for HTTP Basic Auth on authenticated requests (writes, private datasets). This plugin does not implement Basic Auth — it sends `app_token` bare as the `X-App-Token` header, so only a real App Token works here. Pasting an API Key's Key ID in as `app_token` fails silently for some tools and not others: `search_datasets`/`get_dataset` keep working, but `query_dataset` fails with `"Invalid app_token specified"` (HTTP 403) on the `/resource/{id}.json` endpoint. No secret/private key is needed for public open-data portals — the bare App Token is sufficient.
 
@@ -81,90 +134,59 @@ For Socrata-based open data portals (e.g., data.cityofchicago.org, data.cityofne
 plugins:
   socrata:
     enabled: true
-    base_url: "https://data.cityofboston.gov"
-    portal_url: "https://data.cityofboston.gov"
-    city_name: "Boston"
-    app_token: "${SOCRATA_APP_TOKEN}"   # Required
-    timeout: 30.0                        # HTTP timeout (default: 30)
+    base_url: "https://data.yourcity.gov"
+    portal_url: "https://data.yourcity.gov"
+    city_name: "Your City"
+    app_token: "${SOCRATA_APP_TOKEN}" # Required
+    timeout: 30 # HTTP timeout in seconds (default: 30)
 ```
 
 ### Tools
 
-- `socrata__search_datasets(query, limit)` - Search for datasets in the portal catalog; header reports the catalog-wide match count
-- `socrata__get_dataset(dataset_id)` - Full metadata for a dataset (4x4 ID): source/attribution, license, created/published/modified dates, row and column counts, downloads/views, category, tags
-- `socrata__get_schema(dataset_id)` - Get column schema for constructing SoQL queries
-- `socrata__query_dataset(dataset_id, soql_query)` - Query data using SoQL
-- `socrata__execute_sql(dataset_id, soql)` - Execute raw SoQL query (advanced, similar to CKAN execute_sql)
-- `socrata__list_categories()` - List all categories with dataset counts
+| Tool                                             | Description                                     |
+| ------------------------------------------------ | ----------------------------------------------- |
+| `socrata__search_datasets(query, limit)`         | Search for datasets in the portal catalog       |
+| `socrata__get_dataset(dataset_id)`               | Get full metadata for a dataset (4x4 ID)        |
+| `socrata__get_schema(dataset_id)`                | Get column schema for constructing SoQL queries |
+| `socrata__query_dataset(dataset_id, soql_query)` | Query data using SoQL                           |
+| `socrata__list_categories()`                     | List all categories with dataset counts         |
+| `socrata__execute_sql(dataset_id, soql)`         | Execute raw SoQL SELECT (advanced)              |
 
-### Examples
+### Typical Workflow
 
-**Search datasets:**
 ```
-Search for datasets about housing in Boston
-```
-
-**Get dataset:**
-```
-Get details about dataset wc4w-4jew
+list_categories → search_datasets → get_dataset → get_schema → query_dataset
 ```
 
-**Get schema (call before query_dataset):**
-```
-Get schema for dataset wc4w-4jew
-```
+### SoQL Notes
 
-**Query data:**
-```
-Query dataset wc4w-4jew with: SELECT * WHERE year > 2020 LIMIT 50
-```
+- `GROUP BY` is required whenever using `COUNT()` or any aggregation.
+- Boolean fields use `= true` / `= false`, not `= 'Y'` or `= 1`.
+- For conditional counts: `SUM(CASE WHEN col = true THEN 1 ELSE 0 END)`.
+- `LIMIT` caps returned rows and can affect aggregation results.
 
-**List categories:**
-```
-List all dataset categories on Boston's open data portal
-```
+### Implementation Notes
+
+**`execute_sql` security.** Raw SoQL is validated by `SoQLValidator` before execution. Only `SELECT` statements are allowed — `INSERT`, `UPDATE`, `DELETE`, `DROP`, and all other mutations are blocked.
+
+**Retry behavior.** All Discovery API and SODA3 calls automatically retry up to 3 times with exponential backoff (2–10 seconds) via `tenacity`. `RuntimeError` and `HTTPStatusError` are not retried (they indicate a hard failure, not a transient one).
+
+**`list_categories` fallback.** The Discovery API's `facets` parameter often returns empty results for domain-scoped catalog requests (e.g. Chicago). When this happens, the plugin automatically falls back to paginating all datasets and deriving categories from the `domain_category` field in each result.
+
+**Computed region columns.** `get_schema` may return `:@computed_region_*` columns at the end of the schema list. These are system-generated geographic columns — they are not useful for SoQL queries and can be ignored.
+
+**Dual-client architecture.** The plugin uses two separate HTTP clients: Discovery API calls go to `api.us.socrata.com` (catalog search and categories), and SODA3 calls go to the portal's own domain (schema, metadata, data queries). Both clients share the `X-App-Token` header.
 
 ### Socrata API
 
 This plugin uses two Socrata API layers:
-- **Discovery API** (api.us.socrata.com) - Catalog search, categories
-- **SODA3** (portal domain) - Dataset metadata, schema, data queries
+
+- **Discovery API** (api.us.socrata.com) — catalog search, categories
+- **SODA3** (portal domain) — dataset metadata, schema, data queries
 
 See [Socrata developer documentation](https://dev.socrata.com/) for details.
 
-## ArcGIS Plugin
-
-For ArcGIS Hub / ArcGIS Open Data portals (e.g., hub.arcgis.com, city Hub sites).
-
-### Configuration
-
-```yaml
-plugins:
-  arcgis:
-    enabled: true
-    portal_url: "https://hub.arcgis.com"   # ArcGIS Hub portal URL
-    city_name: "Your City"
-    timeout: 120
-    # token: "${ARCGIS_TOKEN}"             # Optional: Bearer token for private items
-    # trusted_service_hosts:               # Extra hosts for self-hosted Feature Services
-    #   - "gis.yourcity.gov"
-```
-
-### Tools
-
-- `arcgis__search_datasets(query, limit)` - Search the Hub catalog (query required)
-- `arcgis__get_dataset(dataset_id)` - Hub item metadata: owner/organization, created/modified/last-edit dates, record count, size, license, categories, type keywords, item and service URLs (host-gated)
-- `arcgis__get_aggregations(field, query)` - Aggregate counts for a field
-- `arcgis__get_schema(dataset_id)` - Get Feature Service layer schema
-- `arcgis__query_data(dataset_id, where, out_fields, limit)` - Query records (limit max 1000)
-
-### Security notes
-
-Feature Service URLs resolved from Hub metadata are restricted to `*.arcgis.com`, the configured portal host, or hosts listed in `trusted_service_hosts` (exact host or subdomain) — an SSRF guard. Add self-hosted city GIS domains to `trusted_service_hosts` when Hub datasets reference them. `where` clauses are validated with a forbidden-keyword scan that skips quoted string literals, so values like `status = 'SET'` are fine.
-
-### ArcGIS API
-
-This plugin uses a two-hop flow: the Hub API resolves a dataset ID to its Feature Service URL, then records are queried from that service.
+---
 
 ## Opendatasoft Plugin
 
@@ -187,14 +209,16 @@ plugins:
 
 ### Tools
 
-- `opendatasoft__search_datasets(query, limit)` - Search the portal catalog (full-text via ODSQL `search()`)
-- `opendatasoft__get_dataset(dataset_id)` - Dataset metadata: publisher, license, attribution, modified/data-processed dates, record and field counts, theme, keywords, references
-- `opendatasoft__get_schema(dataset_id)` - Get field names, types and descriptions for ODSQL clauses
-- `opendatasoft__query_data(dataset_id, where, select, order_by, limit)` - Query records with ODSQL (limit capped at 100)
-- `opendatasoft__aggregate_data(dataset_id, metrics, group_by, where, order_by, limit)` - Aggregate records with GROUP BY
-- `opendatasoft__list_categories()` - List portal themes with dataset counts
+| Tool                                                                          | Description                                                        |
+| ----------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| `opendatasoft__search_datasets(query, limit)`                                 | Search the portal catalog (full-text via ODSQL `search()`)         |
+| `opendatasoft__get_dataset(dataset_id)`                                       | Dataset metadata: publisher, license, dates, record/field counts   |
+| `opendatasoft__get_schema(dataset_id)`                                        | Field names, types and descriptions for ODSQL clauses              |
+| `opendatasoft__query_data(dataset_id, where, select, order_by, limit)`        | Query records with ODSQL (limit capped at 100)                     |
+| `opendatasoft__aggregate_data(dataset_id, metrics, group_by, where, order_by, limit)` | Aggregate records with GROUP BY                            |
+| `opendatasoft__list_categories()`                                             | List portal themes with dataset counts                             |
 
-### ODSQL notes
+### ODSQL Notes
 
 The Explore API takes ODSQL fragments rather than full SQL statements:
 
@@ -205,43 +229,16 @@ The Explore API takes ODSQL fragments rather than full SQL statements:
 - `order_by` takes `field ASC|DESC`, and may reference a `select` alias.
 - The records endpoint returns at most 100 rows per call.
 
-Clauses are validated before dispatch: forbidden SQL keywords are rejected outside of quoted literals (keywords inside literals are treated as data), and `aggregate_data` whitelists group-by fields, metric aliases and aggregate expressions.
+### Implementation Notes
 
-### Examples
+**Clause validation.** `ODSQLValidator` (built on the shared `BaseQueryValidator`) checks every `where`/`select`/`group_by`/`order_by` fragment before dispatch: forbidden SQL keywords are rejected outside of quoted literals (keywords inside literals are treated as data), and `aggregate_data` whitelists group-by fields, metric aliases and aggregate expressions.
 
-**Search datasets:**
-```
-Search for datasets about police calls in Long Beach
-```
-
-**Get dataset:**
-```
-Get details about the police-calls-for-service dataset
-```
-
-**Get schema (call before query_data):**
-```
-Get schema for dataset police-calls-for-service
-```
-
-**Query data:**
-```
-Query police-calls-for-service where call_type = "Noise", ordered by received DESC
-```
-
-**Aggregate data:**
-```
-Count police calls by call_type in Long Beach
-```
-
-**List categories:**
-```
-List all dataset themes on Long Beach's open data portal
-```
+**Global aggregates.** `aggregate_data` without `group_by` returns a single row.
 
 ### Opendatasoft API
 
 This plugin uses the Explore API v2.1 (`{base_url}/api/explore/v2.1`):
+
 - `/catalog/datasets` - Catalog list/search
 - `/catalog/datasets/{dataset_id}` - Dataset metadata including fields
 - `/catalog/datasets/{dataset_id}/records` - Record queries and aggregations
@@ -249,10 +246,8 @@ This plugin uses the Explore API v2.1 (`{base_url}/api/explore/v2.1`):
 
 See [Opendatasoft Explore API documentation](https://help.opendatasoft.com/apis/ods-explore-v2/) for details.
 
+---
+
 ## Custom Plugins
 
-If your portal doesn't use CKAN, you can create a custom plugin. See [Custom Plugins Guide](CUSTOM_PLUGINS.md) for instructions.
-
-## Examples
-
-See [examples/](../examples/) for complete configuration examples.
+If your portal doesn't use CKAN, ArcGIS Hub, Socrata, or Opendatasoft, you can create a custom plugin. See [Custom Plugins Guide](CUSTOM_PLUGINS.md) for instructions.

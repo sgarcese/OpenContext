@@ -36,7 +36,7 @@ Yes, but they must be resolved before deployment. Terraform will set the final c
 
 ### What if I need to change configuration after deployment?
 
-Edit `config.yaml` and run `./scripts/deploy.sh` again. Terraform will update the Lambda environment variable.
+Edit `config.yaml` and run `opencontext deploy --env staging` again (add `--cloud gcp` if you deployed to GCP). Terraform updates the runtime configuration (`OPENCONTEXT_CONFIG`).
 
 ## Plugins
 
@@ -44,7 +44,9 @@ Edit `config.yaml` and run `./scripts/deploy.sh` again. Terraform will update th
 
 Built-in plugins:
 
-- **CKAN** - For CKAN-based portals (data.boston.gov, data.gov, data.gov.uk)
+- **CKAN** — For CKAN-based portals (e.g., data.gov, data.gov.uk)
+- **ArcGIS Hub** — For ArcGIS Hub portals (e.g., hub.arcgis.com)
+- **Socrata** — For Socrata portals (e.g., data.cityofchicago.org)
 
 You can also create custom plugins in `custom_plugins/`.
 
@@ -58,12 +60,21 @@ No. Built-in plugins are part of the core framework. Create a custom plugin inst
 
 ## Deployment
 
-### What AWS resources are created?
+### What cloud resources are created?
+
+**AWS (`--cloud aws`, default):**
 
 - Lambda function
-- Lambda Function URL
+- API Gateway (REST)
 - IAM role and policies
 - CloudWatch Log Group
+- SQS dead-letter queue (async failures)
+
+**GCP (`--cloud gcp`):**
+
+- Cloud Functions gen2 (HTTP)
+- GCS bucket for deployment artifacts
+- IAM for public HTTPS invoke (Cloud Run invoker)
 
 ### How much does it cost?
 
@@ -71,11 +82,11 @@ Typical costs: ~$1/month for 100K requests. See [Deployment Guide](DEPLOYMENT.md
 
 ### Can I deploy to a different cloud provider?
 
-The current implementation is AWS-specific. Contributions for other providers are welcome!
+**AWS** and **GCP** are supported via `--cloud aws` (default) or `--cloud gcp` on `authenticate`, `configure`, `validate`, `deploy`, `status`, `logs`, and `destroy`. See [Deployment Guide](DEPLOYMENT.md) and [terraform/gcp/README.md](../terraform/gcp/README.md). Azure Terraform is a placeholder only.
 
 ### How do I update an existing deployment?
 
-Run `./scripts/deploy.sh` again. Terraform will update the Lambda function.
+Run `opencontext deploy --env staging` again. Terraform will update the Lambda function.
 
 ## Usage
 
@@ -139,11 +150,8 @@ curl -X POST https://your-lambda-url \
 **Option 1: Use the local server**
 
 ```bash
-# Install aiohttp if needed
-pip install aiohttp
-
 # Start local server
-python3 scripts/local_server.py
+opencontext serve
 
 # In another terminal, test with curl
 curl -X POST http://localhost:8000/mcp \
@@ -161,9 +169,9 @@ from plugins.ckan.plugin import CKANPlugin
 
 async def test():
     plugin = CKANPlugin({
-        "base_url": "https://data.boston.gov",
-        "portal_url": "https://data.boston.gov",
-        "city_name": "Boston",
+        "base_url": "https://data.yourcity.gov",
+        "portal_url": "https://data.yourcity.gov",
+        "city_name": "Your City",
         "timeout": 120,
     })
     await plugin.initialize()
@@ -177,8 +185,8 @@ asyncio.run(test())
 **Option 3: Run unit tests**
 
 ```bash
-pip install pytest pytest-asyncio
-pytest tests/
+uv sync --all-extras
+uv run pytest tests/
 ```
 
 ### Can I contribute?

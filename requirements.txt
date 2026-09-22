@@ -1,7 +1,14 @@
+# Pinned Lambda + CI dependencies (opencontext deploy, pip-audit).
+# Local dev: prefer `uv sync --extra cli` or `uv sync --all-extras` — do not duplicate this file by hand.
 httpx>=0.27.0
 pydantic>=2.0.0
 PyYAML>=6.0
 tenacity>=8.0.0
 python-json-logger>=2.0.0
-sqlparse>=0.6.0
-aiohttp>=3.14.3
+sqlparse>=0.4.4
+aiohttp>=3.13.4
+pygments>=2.20.0
+requests>=2.33.0
+pre-commit>=4.5.1
+functions-framework>=3.4.0
+typing-extensions<4.14.0

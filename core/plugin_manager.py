@@ -69,14 +69,18 @@ class PluginManager:
                 if plugin_dir.is_dir() and not plugin_dir.name.startswith("_"):
                     plugin_file = plugin_dir / "plugin.py"
                     if plugin_file.exists():
-                        discovered.append((plugin_dir.name, plugin_dir, "custom_plugins"))
+                        discovered.append(
+                            (plugin_dir.name, plugin_dir, "custom_plugins")
+                        )
 
         logger.debug(
             f"Discovered {len(discovered)} plugins: {[p[0] for p in discovered]}"
         )
         return discovered
 
-    def _load_plugin_class(self, plugin_name: str, plugin_path: Path, source_package: str) -> type:
+    def _load_plugin_class(
+        self, plugin_name: str, plugin_path: Path, source_package: str
+    ) -> type:
         """Load plugin class from a plugin module.
 
         Args:
@@ -149,11 +153,15 @@ class PluginManager:
             )
 
         # Find plugin path and source package
-        _, plugin_path, source_package = next(p for p in discovered if p[0] == plugin_name)
+        _, plugin_path, source_package = next(
+            p for p in discovered if p[0] == plugin_name
+        )
 
         # Load plugin class
         try:
-            plugin_class = self._load_plugin_class(plugin_name, plugin_path, source_package)
+            plugin_class = self._load_plugin_class(
+                plugin_name, plugin_path, source_package
+            )
         except (ImportError, ValueError) as e:
             logger.error(f"Failed to load plugin {plugin_name}: {e}")
             raise RuntimeError(f"Failed to load plugin {plugin_name}: {e}") from e

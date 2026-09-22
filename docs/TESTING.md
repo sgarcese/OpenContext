@@ -7,8 +7,7 @@ This guide covers three ways to test your OpenContext server locally.
 Before testing:
 
 1. Create `config.yaml` from `config-example.yaml` and enable exactly one plugin
-2. Install dependencies: `pip install aiohttp`
-3. Start the server: `python3 scripts/local_server.py`
+2. Start the server: `opencontext serve`
 
 The server runs at `http://localhost:8000/mcp`. Keep it running while you test.
 
@@ -45,7 +44,7 @@ curl -X POST http://localhost:8000/mcp \
 For a full test (initialize, list tools, call tool), run:
 
 ```bash
-./scripts/test_streamable_http.sh
+opencontext test --url http://localhost:8000/mcp
 ```
 
 ---
@@ -107,24 +106,46 @@ asyncio.run(t())
 
 ---
 
-## Unit Tests
+## Automated tests (pytest)
+
+With dev dependencies (`uv sync --all-extras`). Layout: [`tests/README.md`](../tests/README.md).
+
+**Full suite + CI-equivalent coverage:**
 
 ```bash
-pip install pytest pytest-asyncio sqlparse
-pytest
-pytest tests/test_plugin_manager.py -v
-pytest --cov=core --cov=plugins
+uv run pytest tests/ -n auto \
+  --cov=core --cov=plugins --cov=server \
+  --cov-report=term-missing \
+  --cov-fail-under=80
 ```
+
+**Targeted suites** (markers are defined in `pyproject.toml`):
+
+```bash
+uv run pytest tests/integration -m integration -v
+uv run pytest tests/unit -m unit -v
+uv run pytest tests/security -m security -v
+uv run pytest tests/smoke -m smoke -v
+```
+
+Single-file examples:
+
+```bash
+uv run pytest tests/unit/core/test_plugin_manager.py -v
+uv run pytest tests/unit/plugins/ckan/test_ckan_plugin.py -v
+```
+
+`sqlparse` and other test-related packages come from `pyproject.toml`; no extra `pip install` when using `uv sync`.
 
 ---
 
 ## Testing Against Production
 
-To test a deployed server, use the Lambda URL or API Gateway URL:
+To test a deployed server, use the API Gateway URL:
 
 ```bash
-LAMBDA_URL="https://your-lambda-url.lambda-url.us-east-1.on.aws"
-curl -X POST $LAMBDA_URL/mcp \
+API_GW_URL=$(cd terraform/aws && terraform output -raw api_gateway_url)
+curl -X POST $API_GW_URL \
   -H "Content-Type: application/json" \
   -d '{"jsonrpc":"2.0","id":1,"method":"ping"}'
 ```

@@ -1,8 +1,10 @@
 # Terraform Configurations
 
-## AWS (Primary)
+OpenContext supports **AWS** and **GCP** via `opencontext deploy --cloud aws|gcp`. See [Deployment Guide](../docs/DEPLOYMENT.md).
 
-Deploy OpenContext to AWS Lambda. See [Deployment Guide](../docs/DEPLOYMENT.md).
+## AWS
+
+Deploy OpenContext to AWS Lambda + API Gateway.
 
 ### First-time setup: Bootstrap backend
 
@@ -16,13 +18,13 @@ terraform apply
 
 ### Deploy OpenContext
 
-Use the main deploy script (recommended):
+Use the CLI (recommended):
 
 ```bash
-./scripts/deploy.sh
+opencontext deploy --env staging
 ```
 
-Or deploy manually:
+Or deploy manually via Terraform:
 
 ```bash
 cd aws
@@ -35,9 +37,9 @@ terraform apply
 
 ### Alternative: Per-account backend
 
-Use [scripts/setup-backend.sh](../scripts/setup-backend.sh) to create a per-account S3 bucket and DynamoDB table, then generate `terraform/aws/backend.tf` with custom bucket name. Use this if you need a separate state bucket per AWS account.
+Use `opencontext configure --state-bucket <custom-name>` to create a per-account S3 bucket and generate `terraform/aws/backend.tf` with a custom bucket name. Use this if you need a separate state bucket per AWS account.
 
 ## Other Clouds
 
-- **GCP:** [gcp/](gcp/) – Coming soon
+- **GCP:** [gcp/](gcp/) — Cloud Functions gen2 + GCS artifact (see [gcp/README.md](gcp/README.md); bootstrap state in [gcp/bootstrap/](gcp/bootstrap/))
 - **Azure:** [azure/](azure/) – Coming soon

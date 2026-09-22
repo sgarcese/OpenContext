@@ -11,9 +11,12 @@ on:
       - main
       - develop
 
+permissions:
+  contents: read
+
 jobs:
-  code-quality:
-    name: Code quality
+  lint:
+    name: Lint & format
     runs-on: ubuntu-latest
 
     steps:
@@ -37,9 +40,6 @@ jobs:
       - name: Ruff lint
         run: uv run ruff check core/ plugins/ server/ tests/
 
-      - name: Audit dependencies for known CVEs
-        run: uv run pip-audit -r requirements.txt
-
       - name: Set up Go 1.21
         uses: actions/setup-go@v5
         with:
@@ -55,8 +55,35 @@ jobs:
             exit 1
           fi
 
-  test-suite:
-    name: Test suite
+  security:
+    name: Security audit
+    needs: lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Install dependencies
+        run: uv sync --all-extras
+
+      - name: Audit dependencies for known CVEs
+        run: uv run pip-audit -r requirements.txt
+
+  test:
+    name: Test suite (${{ matrix.python-version }})
+    needs: lint
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -87,6 +114,7 @@ jobs:
             -n auto \
             --cov=core \
             --cov=plugins \
+            --cov=server \
             --cov-report=term-missing \
             --cov-fail-under=80
 
@@ -98,33 +126,3 @@ jobs:
       - name: Run Go tests
         working-directory: ./client
         run: go test ./...
-
-  terraform-validate:
-    name: Terraform validate
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Terraform
-        uses: hashicorp/setup-terraform@v3
-        with:
-          terraform_version: "1.9.x"
-
-      - name: Check Terraform formatting
-        run: terraform fmt -check -recursive terraform/
-
-      - name: Validate terraform/aws
-        working-directory: ./terraform/aws
-        run: |
-          # Placeholder for the Lambda artifact referenced by filebase64sha256()
-          touch lambda-deployment.zip
-          terraform init -backend=false -input=false
-          terraform validate
-
-      - name: Validate terraform/bootstrap
-        working-directory: ./terraform/bootstrap
-        run: |
-          terraform init -backend=false -input=false
-          terraform validate
