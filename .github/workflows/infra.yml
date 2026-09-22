@@ -1,17 +1,16 @@
 ---
 name: Infrastructure
 
+# Runs on every push/PR, not only terraform/** changes: the
+# "Terraform lint & validate" check is required by the main branch ruleset,
+# and a path-filtered job would never report on non-terraform PRs.
 on:
   push:
     branches:
       - main
-    paths:
-      - "terraform/**"
   pull_request:
     branches:
       - main
-    paths:
-      - "terraform/**"
 
 permissions:
   contents: read

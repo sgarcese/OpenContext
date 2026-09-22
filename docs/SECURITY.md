@@ -23,9 +23,15 @@ IDs that the connector forwards to the portal. Defenses:
   the configured portal/base host (or a trusted extra such as `*.arcgis.com`).
   A lapsed domain can be re-registered by someone else, so the credential is
   never forwarded to it; the request still follows through, unauthenticated.
-- **ArcGIS SSRF allow-list** (`_validate_feature_url`, `trusted_service_hosts`)
-  stops a dataset record from steering Feature Service requests to arbitrary
-  hosts.
+- **ArcGIS SSRF guard** (`_validate_feature_url`, `trusted_service_hosts`,
+  `auto_trust_hub_services`) stops a dataset record from steering Feature
+  Service requests to arbitrary hosts. `*.arcgis.com`, the portal host and
+  the explicit allow-list are always trusted. Hub-referenced hosts are
+  auto-trusted only for https URLs on public DNS names with an ArcGIS REST
+  service path; IP literals (e.g. cloud metadata endpoints), single-label
+  and `.internal`/`.local` names, and non-service paths are refused, the
+  bearer token is never forwarded to an auto-trusted host (redirect
+  credential scoping applies), and operators can disable auto-trust.
 
 ## Inbound: portal → LLM (prompt injection)
 

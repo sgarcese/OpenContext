@@ -229,6 +229,19 @@ def _prompt_plugin_config(plugin: str, defaults: dict) -> dict:
             default=str(plugin_defaults.get("timeout", 120)),
         ).ask()
         cfg["timeout"] = int(timeout)
+        # Hub catalogs often reference Feature Services on city GIS domains
+        # (e.g. maps2.dcgis.dc.gov for DC). Hub-referenced ArcGIS service
+        # URLs are auto-trusted by default; this allow-list covers hosts the
+        # auto-trust rules refuse (http-only services, non-standard paths).
+        extra_hosts = questionary.text(
+            "Additional trusted Feature Service hosts (comma-separated, blank for none):",
+            default=", ".join(plugin_defaults.get("trusted_service_hosts", []) or []),
+        ).ask()
+        cfg["trusted_service_hosts"] = (
+            None
+            if extra_hosts is None
+            else [h.strip() for h in extra_hosts.split(",") if h.strip()]
+        )
 
     # Abort if any prompt was cancelled (Ctrl+C)
     for v in cfg.values():

@@ -237,6 +237,7 @@ class TestPluginConfigStructure:
                 self._mock_ask("https://hub.arcgis.com"),
                 self._mock_ask("TestCity"),
                 self._mock_ask("120"),
+                self._mock_ask(""),
             ]
 
             from cli.commands.configure import _prompt_plugin_config
@@ -246,6 +247,26 @@ class TestPluginConfigStructure:
             assert "portal_url" in result
             assert "city_name" in result
             assert "timeout" in result
+            assert result["trusted_service_hosts"] == []
+
+    def test_arcgis_trusted_service_hosts_parsed(self):
+        from unittest.mock import patch
+
+        with patch("cli.commands.configure.questionary") as mock_q:
+            mock_q.text.side_effect = [
+                self._mock_ask("https://opendata.dc.gov"),
+                self._mock_ask("DC"),
+                self._mock_ask("120"),
+                self._mock_ask(" maps2.dcgis.dc.gov, maps1.dcgis.dc.gov ,"),
+            ]
+
+            from cli.commands.configure import _prompt_plugin_config
+
+            result = _prompt_plugin_config("ArcGIS", {})
+            assert result["trusted_service_hosts"] == [
+                "maps2.dcgis.dc.gov",
+                "maps1.dcgis.dc.gov",
+            ]
 
 
 # ---------------------------------------------------------------------------

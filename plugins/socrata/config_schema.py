@@ -20,11 +20,14 @@ class SocrataPluginConfig(BasePluginConfig):
     portal_url: str = Field(
         ..., description="Public portal URL (e.g., https://data.example.gov)"
     )
-    app_token: str = Field(
-        ...,
+    app_token: str | None = Field(
+        None,
         description=(
-            "Socrata App Token (required for SODA3 API). Must be an App "
-            "Token from Developer Settings -> App Tokens (or "
+            "Socrata App Token (optional, recommended). Without one, requests "
+            "share the portal's per-IP pool and may be throttled; portals such "
+            "as data.cdc.gov serve untokened requests but reject an invalid "
+            "token (403), so leave this unset rather than guessing. Must be an "
+            "App Token from Developer Settings -> App Tokens (or "
             "dev.socrata.com/register) — sent bare as the X-App-Token "
             "header. Do NOT use the Key ID from an API Key pair (Developer "
             "Settings -> API Keys): that credential type is for HTTP Basic "
@@ -37,14 +40,10 @@ class SocrataPluginConfig(BasePluginConfig):
 
     @field_validator("app_token")
     @classmethod
-    def validate_app_token(cls, v: str) -> str:
-        """Validate that app token is non-empty."""
-        if not v or not v.strip():
-            raise ValueError(
-                "Socrata requires a free App Token (not an API Key ID) from "
-                "Developer Settings -> App Tokens, or "
-                "https://dev.socrata.com/register"
-            )
+    def validate_app_token(cls, v: str | None) -> str | None:
+        """Normalize the app token: a blank value means "no token" (no header)."""
+        if v is None or not v.strip():
+            return None
         return v.strip()
 
     _validate_urls = field_validator("base_url", "portal_url")(
