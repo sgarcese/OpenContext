@@ -15,10 +15,10 @@ class SocrataPluginConfig(BasePluginConfig):
     """
 
     base_url: str = Field(
-        ..., description="Portal URL (e.g., https://data.cityofboston.gov)"
+        ..., description="Portal URL (e.g., https://data.example.gov)"
     )
     portal_url: str = Field(
-        ..., description="Public portal URL (e.g., https://data.cityofboston.gov)"
+        ..., description="Public portal URL (e.g., https://data.example.gov)"
     )
     app_token: str = Field(
         ...,

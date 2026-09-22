@@ -136,6 +136,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env.*
 .envrc
 .venv
 env/
@@ -212,6 +213,7 @@ lambda-deployment.zip
 terraform/*/.terraform/
 terraform/*/.terraform.lock.hcl
 terraform/*/lambda-deployment.zip
+terraform/*/gcf-deployment.zip
 
 # Terraform state (contains secrets, ignore across all folders)
 **/*.tfstate
@@ -229,7 +231,11 @@ client/opencontext-client-*
 config.yaml
 examples/
 
-# Claude Code local files
-CLAUDE.md
+# Local Claude overrides
 CLAUDE.local.md
-.claude/
+
+# Terraform variable files (may contain real secrets — use *.tfvars.example as templates)
+terraform/**/*.tfvars
+
+# Claude Code — only personal local overrides are gitignored
+.claude/settings.local.json

@@ -16,9 +16,6 @@ IDs that the connector forwards to the portal. Defenses:
   BY`, and `HAVING` values assembled by `aggregate_data`.
 - **`build_where_clause`** escapes values and rejects non-identifier field
   names.
-- **Catalog filter whitelisting (CKAN)** (`_build_fq`) restricts `list_datasets`
-  / `get_catalog_stats` filters to known Solr fields and quotes values as
-  escaped Solr phrases, so model-supplied filter values cannot alter the query.
 - **Redirect credential scoping** (`_create_http_client(protect_headers=…)`)
   follows redirects (so a renamed portal domain such as `data.sfgov.org` →
   `data.sf.gov` keeps working) but strips the credential header (Socrata

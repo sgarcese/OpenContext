@@ -12,28 +12,47 @@
 
 ## Quick Start
 
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first, then:
+
 ```bash
-# 1. Configure (create config, enable one data source)
-cp config-example.yaml config.yaml
-# Edit config.yaml - set enabled: true for one plugin
+# 0. Install the CLI (project + CLI extras into .venv)
+git clone https://github.com/thealphacubicle/OpenContext.git
+cd OpenContext
+uv sync --extra cli
 
-# 2. Test locally
-pip install aiohttp
-python3 scripts/local_server.py
+# 1. Check prerequisites (Python 3.11+, uv, AWS CLI, Terraform)
+uv run opencontext authenticate
 
-# 3. Deploy
-./scripts/deploy.sh
+# 2. Configure interactively (creates config.yaml + Terraform workspace)
+uv run opencontext configure
+# or for GCP -- note: you must have a GCP project set up; you will be prompted for the project ID when you run this command
+uv run opencontext configure --cloud gcp
+
+# 3. Test locally (optional)
+uv run opencontext serve
+
+# 4. Deploy
+uv run opencontext deploy --env staging
+# or for GCP:
+uv run opencontext deploy --cloud gcp --env staging
 ```
 
 Connect via **Claude Connectors** (same steps on both Claude.ai and Claude Desktop):
 
 1. Go to **Settings** → **Connectors** (or **Customize** → **Connectors** on claude.ai)
 2. Click **Add custom connector**
-3. Enter a name (e.g. "Boston OpenData") and your API Gateway URL
-
-Get the URL: `cd terraform/aws && terraform output -raw api_gateway_url`
+3. Enter a name (e.g. "Your City OpenData") and your API Gateway URL (printed at the end of `opencontext deploy`)
 
 See [Getting Started](docs/GETTING_STARTED.md) for full setup.
+
+---
+
+## Using uv and `requirements.txt`
+
+- **Default workflow:** `uv sync --extra cli` (or `uv sync --all-extras` for development) installs from `pyproject.toml` and the lockfile into `.venv`. Run CLI and tools with `uv run …` when you want to use the project environment without activating the venv.
+- **`requirements.txt`** is kept for **Lambda packaging** ( `opencontext deploy` installs with `uv pip install … -r requirements.txt` ) and **security scans** in CI (e.g. `uv run pip-audit -r requirements.txt`). You usually do not install from `requirements.txt` by hand unless debugging those flows.
+
+Details: [Getting Started — full walkthrough](docs/GETTING_STARTED.md) (section *Using uv with requirements.txt*).
 
 ---
 
@@ -43,18 +62,14 @@ See [Getting Started](docs/GETTING_STARTED.md) for full setup.
 | Doc                                        | Description                                     |
 | ------------------------------------------ | ----------------------------------------------- |
 | [Getting Started](docs/GETTING_STARTED.md) | Setup and usage                                 |
+| [CLI Reference](docs/CLI.md)               | All CLI commands and flags                      |
 | [Architecture](docs/ARCHITECTURE.md)       | System design and plugins                       |
-| [Deployment](docs/DEPLOYMENT.md)           | AWS, Terraform, monitoring                      |
+| [Built-in Plugins](docs/BUILT_IN_PLUGINS.md) | CKAN, ArcGIS Hub, Socrata, Opendatasoft plugin details |
+| [Custom Plugins](docs/CUSTOM_PLUGINS.md)   | How to write your own plugin                    |
+| [Deployment](docs/DEPLOYMENT.md)           | AWS & GCP (`--cloud`), Terraform, monitoring    |
 | [Testing](docs/TESTING.md)                 | Local testing (Terminal, Claude, MCP Inspector) |
 | [Security](docs/SECURITY.md)               | Threat model, prompt-injection guardrails       |
 
-
----
-
-## Examples
-
-- **Boston OpenData (CKAN):** [examples/boston-opendata/config.yaml](examples/boston-opendata/config.yaml)
-- **Custom plugin:** [examples/custom-plugin/](examples/custom-plugin/)
 
 ---
 
@@ -63,11 +78,11 @@ See [Getting Started](docs/GETTING_STARTED.md) for full setup.
 Pre-commit hooks (optional):
 
 ```bash
-pip install pre-commit
-pre-commit install
+uv sync --all-extras   # includes pre-commit; use --extra cli if you only need the CLI
+uv run pre-commit install
 ```
 
-Hooks: Ruff, yamllint, gofmt. Run manually: `pre-commit run --all-files`.
+Hooks: Ruff, yamllint, gofmt. Run manually: `uv run pre-commit run --all-files`.
 
 ---
 
@@ -75,4 +90,4 @@ Hooks: Ruff, yamllint, gofmt. Run manually: `pre-commit run --all-files`.
 
 MIT — see [LICENSE](LICENSE).
 
-**Author:** Srihari Raman, City of Boston Department of Innovation and Technology
+**Author:** Srihari Raman

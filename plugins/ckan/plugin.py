@@ -129,7 +129,7 @@ def _clamp(value: Any, default: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, n))
 
 
-def _validate_identifier(name: str) -> None:
+def _validate_identifier(name: str) -> str:
     """Validate that ``name`` is a safe SQL identifier.
 
     Args:
@@ -140,9 +140,10 @@ def _validate_identifier(name: str) -> None:
     """
     if not isinstance(name, str) or not _SAFE_IDENTIFIER.match(name):
         raise ValueError(f"Invalid identifier: {name!r}")
+    return name
 
 
-def _validate_metric_expr(expr: str) -> None:
+def _validate_metric_expr(expr: str) -> str:
     """Validate that ``expr`` is a safe aggregate metric expression.
 
     Args:
@@ -152,7 +153,8 @@ def _validate_metric_expr(expr: str) -> None:
         ValueError: If ``expr`` is not an allowed aggregate expression.
     """
     if not isinstance(expr, str) or not _SAFE_METRIC_EXPR.match(expr):
-        raise ValueError(f"Invalid metric expression: {expr!r}")
+        raise ValueError(f"Disallowed metric expression: {expr!r}")
+    return expr
 
 
 class CKANPlugin(BaseOpenDataPlugin):

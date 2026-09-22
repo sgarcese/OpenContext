@@ -3,7 +3,7 @@ name = "opencontext"
 version = "1.0.0"
 description = "Extensible MCP framework template for civic data platforms"
 authors = [
-    {name = "Srihari Raman", email = "srihari.raman@boston.gov"}
+    {name = "Srihari Raman", email = "srihari.raman@outlook.com"}
 ]
 license = {text = "MIT"}
 readme = "README.md"
@@ -14,19 +14,36 @@ dependencies = [
     "PyYAML>=6.0",
     "tenacity>=8.0.0",
     "python-json-logger>=2.0.0",
-    "sqlparse>=0.6.0",
-    "aiohttp>=3.14.3",
+    "sqlparse>=0.4.4",
+    "aiohttp>=3.13.4",
+    "pygments>=2.20.0",
+    "requests>=2.33.0",
+    "pre-commit>=4.5.1",
+    "boto3>=1.42.83",
+    "botocore>=1.42.83",
+    "click>=8.3.1",
+    "pytest>=9.0.2",
+    "functions-framework>=3.4.0",
+    "typing-extensions<4.14.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=9.0.3",
+    "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "pytest-cov>=4.0.0",
     "pytest-xdist>=3.0.0",
     "ruff>=0.1.0",
     "pip-audit>=2.0.0",
 ]
+cli = [
+    "typer>=0.9.0",
+    "questionary>=2.0.0",
+    "rich>=13.0.0",
+]
+
+[project.scripts]
+opencontext = "cli.main:app"
 
 [project.urls]
 Homepage = "https://github.com/thealphacubicle/OpenContext"
@@ -38,11 +55,17 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["core*", "server*", "plugins*", "custom_plugins*"]
+include = ["core*", "server*", "plugins*", "custom_plugins*", "cli*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "unit: fast isolated unit tests",
+    "integration: hermetic cross-component integration tests",
+    "security: security and validation guardrail tests",
+    "smoke: lightweight smoke checks",
+]
 
 [tool.coverage.run]
 # Exclude hard-to-test modules from coverage (formatters, integration-heavy plugin code)
