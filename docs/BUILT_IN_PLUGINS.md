@@ -74,6 +74,9 @@ plugins:
     city_name: "Your City" # City/organization name
     timeout: 120 # HTTP timeout in seconds
     token: "${ARCGIS_TOKEN}" # Optional: bearer token for private items
+    # trusted_service_hosts: # Extra Feature Service hosts to allow explicitly
+    #   - "maps2.dcgis.dc.gov"
+    # auto_trust_hub_services: true # Accept Hub-referenced ArcGIS service URLs (default)
 ```
 
 ### Tools
@@ -97,7 +100,9 @@ plugins:
 
 **WHERE clause validation.** The `where` parameter is validated by `WhereValidator` before being sent to the Feature Service. Malformed SQL WHERE clauses are rejected before the network call.
 
-**Feature Service host restriction.** For security, Feature Service URLs are restricted to `*.arcgis.com` or the `portal_url` domain configured in `config.yaml`. The plugin validates the URL's host against this allowlist before querying the service.
+**Feature Service host restriction.** A dataset record could point `query_data`/`get_schema` at an arbitrary host (SSRF), so the plugin validates the Feature Service URL before querying it. Always trusted: `*.arcgis.com`, the `portal_url` host, and anything in `trusted_service_hosts`. Hub catalogs routinely reference services self-hosted on city GIS domains (`gis.charlottenc.gov`, `maps2.dcgis.dc.gov`, `gis.indy.gov`), so by default (`auto_trust_hub_services: true`) a Hub-referenced URL is also accepted when it is https, on a public DNS name (never an IP literal, single label, or `.internal`/`.local` name), and has an ArcGIS REST path (`/rest/services/.../FeatureServer|MapServer[/layer]`). The bearer `token` is never sent to auto-trusted hosts. A refused URL raises an error beginning `untrusted_service_host: '<host>'` that names the host to add to `trusted_service_hosts`. Set `auto_trust_hub_services: false` to require an explicit allow-list.
+
+**Schema fallback.** `get_schema` reads the layer metadata endpoint (`.../FeatureServer/0?f=json`). Some self-hosted services return HTML or an ArcGIS error envelope there while `/query` works; in that case the plugin derives the field list from a one-row query instead of failing.
 
 **Auto layer index.** If the dataset's service URL points at a `FeatureServer` or `MapServer` root without a layer index (e.g. `.../FeatureServer`), the plugin automatically appends `/0` to target the default layer.
 
@@ -124,7 +129,7 @@ This plugin uses two API layers:
 
 For Socrata-based open data portals (e.g., data.cityofchicago.org, data.cityofnewyork.us, data.seattle.gov).
 
-**Note:** A Socrata App Token is **required**. Register for a free token at [https://dev.socrata.com/register](https://dev.socrata.com/register), or generate one from a portal's *Developer Settings → App Tokens*.
+**Note:** An App Token is optional but recommended. Without one, requests share the portal's per-IP pool and may be throttled. Register for a free token at [https://dev.socrata.com/register](https://dev.socrata.com/register), or generate one from a portal's *Developer Settings → App Tokens*. Leave `app_token` unset rather than guessing: some portals (e.g. data.cdc.gov) serve untokened requests fine but reject an invalid token with HTTP 403.
 
 **Careful — App Token vs. API Key:** Socrata's developer console also offers a separate "API Key" credential (*Developer Settings → API Keys*), which issues a **Key ID + Key Secret pair** for HTTP Basic Auth on authenticated requests (writes, private datasets). This plugin does not implement Basic Auth — it sends `app_token` bare as the `X-App-Token` header, so only a real App Token works here. Pasting an API Key's Key ID in as `app_token` fails silently for some tools and not others: `search_datasets`/`get_dataset` keep working, but `query_dataset` fails with `"Invalid app_token specified"` (HTTP 403) on the `/resource/{id}.json` endpoint. No secret/private key is needed for public open-data portals — the bare App Token is sufficient.
 
@@ -137,7 +142,7 @@ plugins:
     base_url: "https://data.yourcity.gov"
     portal_url: "https://data.yourcity.gov"
     city_name: "Your City"
-    app_token: "${SOCRATA_APP_TOKEN}" # Required
+    app_token: "${SOCRATA_APP_TOKEN}" # Optional (recommended); omit to send no X-App-Token header
     timeout: 30 # HTTP timeout in seconds (default: 30)
 ```
 

@@ -178,6 +178,8 @@ plugins:
     city_name: "Your City"
     timeout: 120
     token: "${ARCGIS_TOKEN}"  # Optional: bearer token for private items
+    # trusted_service_hosts: ["maps2.dcgis.dc.gov"]  # explicit extra hosts
+    # auto_trust_hub_services: true  # accept Hub-referenced service URLs (default)
 ```
 
 **Tools:**
@@ -202,7 +204,7 @@ plugins:
     base_url: "https://data.yourcity.gov"
     portal_url: "https://data.yourcity.gov"
     city_name: "Your City"
-    app_token: "${SOCRATA_APP_TOKEN}"  # Recommended; register at dev.socrata.com
+    app_token: "${SOCRATA_APP_TOKEN}"  # Optional (recommended); register at dev.socrata.com
     timeout: 30
 ```
 

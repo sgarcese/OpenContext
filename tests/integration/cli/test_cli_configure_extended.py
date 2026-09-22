@@ -180,6 +180,7 @@ class TestConfigureWizardCKAN:
                 "https://hub.arcgis.com",  # portal_url
                 "Seattle",  # city_name (plugin)
                 "120",  # timeout
+                "",  # trusted_service_hosts (none)
                 "us-west-2",  # region
                 "seattle-mcp-prod",  # lambda_name
                 "512",  # lambda_memory
@@ -360,9 +361,10 @@ class TestPromptPluginConfigCancellation:
                 "CKAN",
                 ["https://data.example.gov", "https://data.example.gov", None, "120"],
             ),
-            # ArcGIS: 3 text prompts (portal_url, city_name, timeout).
-            # city_name is stored directly so None triggers the check.
-            ("ArcGIS", ["https://hub.arcgis.com", None, "120"]),
+            # ArcGIS: 4 text prompts (portal_url, city_name, timeout,
+            # trusted_service_hosts). city_name is stored directly so None
+            # triggers the check.
+            ("ArcGIS", ["https://hub.arcgis.com", None, "120", ""]),
         ],
     )
     def test_exits_on_none_prompt(self, plugin, responses):
