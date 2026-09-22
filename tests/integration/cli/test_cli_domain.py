@@ -1,6 +1,7 @@
 """Tests for CLI domain and status commands."""
 
 import json
+import re
 import subprocess
 from unittest.mock import patch
 
@@ -149,9 +150,9 @@ class TestEmailTemplate:
             validation_name="_abc.data-mcp.boston.gov",
             validation_value="_xyz.acm-validations.aws",
         )
-        assert "data-mcp.boston.gov" in result
-        assert "d-abc.execute-api" in result
-        assert "_abc.data-mcp" in result
+        assert re.search(r"\bdata-mcp\.boston\.gov\b", result)
+        assert re.search(r"\bd-abc\.execute-api\b", result)
+        assert re.search(r"_abc\.data-mcp", result)
 
 
 # ---------------------------------------------------------------------------

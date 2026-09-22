@@ -16,6 +16,9 @@ env:
   BINARY_NAME: opencontext-client
   GO_VERSION: "1.21"
 
+permissions:
+  contents: read
+
 jobs:
   validate:
     name: Pre-release validation

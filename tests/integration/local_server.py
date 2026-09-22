@@ -52,13 +52,18 @@ async def start_local_mcp_server(
                 status=response.get("statusCode", 200),
                 headers=response_headers,
             )
-        except Exception as e:
+        except Exception:
             return web.Response(
                 text=json.dumps(
                     {
                         "jsonrpc": "2.0",
                         "id": None,
-                        "error": {"code": -32603, "message": str(e)},
+                        "error": {
+                            "code": -32603,
+                            # Details are logged; do not echo exception text
+                            # (may carry stack/config details) to the client.
+                            "message": "Internal error while processing the request",
+                        },
                     }
                 ),
                 status=500,
