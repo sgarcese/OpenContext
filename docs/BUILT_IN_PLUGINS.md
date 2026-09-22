@@ -71,7 +71,7 @@ See [CKAN API documentation](https://docs.ckan.org/en/latest/api/) for details.
 
 For Socrata-based open data portals (e.g., data.cityofchicago.org, data.cityofnewyork.us, data.seattle.gov).
 
-**Note:** Socrata requires a free App Token. Register at [https://dev.socrata.com/register](https://dev.socrata.com/register), or generate one from a portal's *Developer Settings → App Tokens*.
+**Note:** An App Token is optional but recommended. Without one, requests share the portal's per-IP pool and may be throttled. Register for a free token at [https://dev.socrata.com/register](https://dev.socrata.com/register), or generate one from a portal's *Developer Settings → App Tokens*. Leave `app_token` unset rather than guessing: some portals (e.g. data.cdc.gov) serve untokened requests fine but reject an invalid token with HTTP 403.
 
 **Careful — App Token vs. API Key:** Socrata's developer console also offers a separate "API Key" credential (*Developer Settings → API Keys*), which issues a **Key ID + Key Secret pair** for HTTP Basic Auth on authenticated requests (writes, private datasets). This plugin does not implement Basic Auth — it sends `app_token` bare as the `X-App-Token` header, so only a real App Token works here. Pasting an API Key's Key ID in as `app_token` fails silently for some tools and not others: `search_datasets`/`get_dataset` keep working, but `query_dataset` fails with `"Invalid app_token specified"` (HTTP 403) on the `/resource/{id}.json` endpoint. No secret/private key is needed for public open-data portals — the bare App Token is sufficient.
 
@@ -84,7 +84,7 @@ plugins:
     base_url: "https://data.cityofboston.gov"
     portal_url: "https://data.cityofboston.gov"
     city_name: "Boston"
-    app_token: "${SOCRATA_APP_TOKEN}"   # Required
+    app_token: "${SOCRATA_APP_TOKEN}"   # Optional (recommended); omit to send no X-App-Token header
     timeout: 30.0                        # HTTP timeout (default: 30)
 ```
 
@@ -147,7 +147,8 @@ plugins:
     timeout: 120
     # token: "${ARCGIS_TOKEN}"             # Optional: Bearer token for private items
     # trusted_service_hosts:               # Extra hosts for self-hosted Feature Services
-    #   - "gis.yourcity.gov"
+    #   - "gis.yourcity.gov"                #   (for hosts the auto-trust rules refuse, e.g. http-only)
+    # auto_trust_hub_services: true        # Accept Hub-referenced https ArcGIS service URLs (default)
 ```
 
 ### Tools
@@ -160,7 +161,9 @@ plugins:
 
 ### Security notes
 
-Feature Service URLs resolved from Hub metadata are restricted to `*.arcgis.com`, the configured portal host, or hosts listed in `trusted_service_hosts` (exact host or subdomain) — an SSRF guard. Add self-hosted city GIS domains to `trusted_service_hosts` when Hub datasets reference them. `where` clauses are validated with a forbidden-keyword scan that skips quoted string literals, so values like `status = 'SET'` are fine.
+Feature Service URLs resolved from Hub metadata are validated before they are queried — an SSRF guard. Always trusted: `*.arcgis.com`, the configured portal host, and hosts listed in `trusted_service_hosts` (exact host or subdomain). Hub catalogs routinely reference services self-hosted on city GIS domains (`gis.charlottenc.gov`, `maps2.dcgis.dc.gov`, `gis.indy.gov`), so by default (`auto_trust_hub_services: true`) a Hub-referenced URL is also accepted when it is https, on a public DNS name (never an IP literal, single label, or `.internal`/`.local` name), and has an ArcGIS REST path (`/rest/services/.../FeatureServer|MapServer[/layer]`). The bearer `token` is never sent to auto-trusted hosts. A refused URL raises an error beginning `untrusted_service_host: '<host>'` that names the host to add to `trusted_service_hosts`; set `auto_trust_hub_services: false` to require an explicit allow-list.
+
+`get_schema` reads the layer metadata endpoint with `f=json` as a query parameter and, when a service answers with HTML or an ArcGIS error envelope there while `/query` works, derives the field list from a one-row query instead of failing. Service roots (`.../FeatureServer`) resolve to their first layer id from the service description (then first table, then `0`), so services whose only layer is not id 0 are queryable. `where` clauses are validated with a forbidden-keyword scan that skips quoted string literals, so values like `status = 'SET'` are fine.
 
 ### ArcGIS API
 

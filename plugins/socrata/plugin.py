@@ -49,7 +49,11 @@ class SocrataPlugin(BaseOpenDataPlugin):
             True if initialization succeeded
         """
         try:
-            headers = {"X-App-Token": self.plugin_config.app_token}
+            # Optional token: portals such as data.cdc.gov serve untokened
+            # requests but reject an invalid one (403), so send the header
+            # only when set.
+            token = self.plugin_config.app_token
+            headers = {"X-App-Token": token} if token else {}
 
             self.discovery_client = self._create_http_client(
                 base_url=DISCOVERY_API_BASE,
