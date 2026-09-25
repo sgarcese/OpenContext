@@ -698,17 +698,23 @@ class TestFormatAggregations:
 
 
 # ---------------------------------------------------------------------------
-# _extract_dataset_summary — description truncation
+# _extract_dataset_summary — description kept whole, as plain text
 # ---------------------------------------------------------------------------
 
 
 class TestExtractDatasetSummary:
-    def test_truncates_long_description(self):
-        long_desc = "A" * 400
-        props = {"description": long_desc}
+    def test_keeps_long_description_whole(self):
+        """Issue #32: the 300-character cut hid definitions analysts need."""
+        long_desc = "A" * 3_539
+        result = ArcGISPlugin._extract_dataset_summary({"description": long_desc})
+        assert result["description"] == long_desc
+
+    def test_html_description_becomes_plain_text(self):
+        props = {
+            "description": "<p>Rents &amp; <b>limits</b></p><ul><li>-4 = suppressed</li></ul>"
+        }
         result = ArcGISPlugin._extract_dataset_summary(props)
-        assert len(result["description"]) <= 304  # 300 + "..."
-        assert result["description"].endswith("...")
+        assert result["description"] == "Rents & limits\n\n- -4 = suppressed"
 
     def test_short_description_not_truncated(self):
         props = {"description": "Short desc"}

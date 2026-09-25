@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import re
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
 
@@ -15,7 +16,7 @@ import httpx
 
 from core.base_plugin import HTTP_RETRY, ROW_FORMATS, BaseOpenDataPlugin, ToolHandler
 from core.interfaces import PluginType, ToolDefinition, ToolResult
-from core.portal_content import join_cleaned
+from core.portal_content import html_to_text, join_cleaned
 from plugins.arcgis.config_schema import ArcGISPluginConfig
 from plugins.arcgis.where_validator import WhereValidator
 
@@ -32,6 +33,11 @@ _SERVICE_ROOT = re.compile(
     r"^(?P<root>.+/(?:FeatureServer|MapServer))(?:/(?P<layer>\d+))?/?$",
     re.IGNORECASE,
 )
+# Character budget for a dataset description in get_dataset (HUD's Fair
+# Market Rents description is about 3,500 characters).
+DESCRIPTION_MAX = 12_000
+# Coded domain values listed per field in get_schema.
+_MAX_DOMAIN_VALUES = 30
 # Statistic types accepted by aggregate_data (ArcGIS ``statisticType``).
 STATISTIC_TYPES = ("count", "sum", "avg", "min", "max", "stddev")
 # A plain field name or output alias.
@@ -75,6 +81,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         self._layer_url_cache: dict[str, str] = {}
         # service root URL -> its layers and tables (see _service_layers)
         self._service_layers_cache: dict[str, list[dict[str, Any]]] = {}
+        # layer URL -> layer metadata ({layer_url}?f=json, see _layer_metadata)
+        self._layer_metadata_cache: dict[str, dict[str, Any]] = {}
 
     async def initialize(self) -> bool:
         """Initialize ArcGIS Hub plugin and test connection.
@@ -504,7 +512,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
     async def _tool_get_dataset(self, arguments: dict[str, Any]) -> ToolResult:
         dataset = await self.get_dataset(arguments["dataset_id"])
-        dataset["layers"] = await self._dataset_layers(dataset)
+        await self._add_service_details(dataset)
         return ToolResult(
             content=[{"type": "text", "text": self._format_dataset(dataset)}],
             success=True,
@@ -636,8 +644,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         result = self._extract_dataset_summary(props)
         result.update(
             {
-                "snippet": props.get("snippet", ""),
-                "licenseInfo": props.get("licenseInfo", ""),
+                "snippet": html_to_text(props.get("snippet")),
+                "licenseInfo": html_to_text(props.get("licenseInfo")),
                 "spatialReference": props.get("spatialReference", ""),
                 "geometryType": props.get("geometryType", ""),
                 "additionalResources": props.get("additionalResources", []),
@@ -650,7 +658,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                 "lastEditDate": self.short_date(
                     props.get("serviceLastEditDate") or props.get("lastEditDate")
                 ),
-                "accessInformation": props.get("accessInformation", ""),
+                "accessInformation": html_to_text(props.get("accessInformation")),
             }
         )
         return result
@@ -670,25 +678,34 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                 default layer (see :meth:`_resolve_layer_url`).
 
         Returns:
-            List of field definition dictionaries (name, type, alias)
+            List of field definition dictionaries (name, type, alias, plus
+            ``length`` for string fields and ``domain`` when the service
+            defines them)
 
         Raises:
             ValueError: If the dataset has no queryable service URL.
         """
-        layer_url = await self._layer_url_for(dataset_id, layer)
+        layer_url, _ = await self._layer_url_for(dataset_id, layer)
         fields, _ = await self._layer_fields(layer_url)
-        return [
-            {
+        schema = []
+        for f in fields:
+            entry = {
                 "name": f.get("name", ""),
                 "type": f.get("type", ""),
                 "alias": f.get("alias", ""),
             }
-            for f in fields
-        ]
+            if isinstance(f.get("length"), int) and f.get("type") == (
+                "esriFieldTypeString"
+            ):
+                entry["length"] = f["length"]
+            if isinstance(f.get("domain"), dict):
+                entry["domain"] = f["domain"]
+            schema.append(entry)
+        return schema
 
     async def _layer_url_for(
         self, dataset_id: str, layer: int | None, *, queryable_only: bool = False
-    ) -> str:
+    ) -> tuple[str, dict[str, Any]]:
         """Resolve a Hub item to a trusted layer URL (two-hop).
 
         Args:
@@ -697,7 +714,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             queryable_only: Refuse item types outside :attr:`QUERYABLE_TYPES`.
 
         Returns:
-            The validated layer URL (``.../FeatureServer/<id>``).
+            ``(layer_url, dataset)``: the validated layer URL
+            (``.../FeatureServer/<id>``) and the item metadata.
 
         Raises:
             ValueError: If the item has no service URL, is not a queryable
@@ -721,7 +739,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             self.plugin_config.trusted_service_hosts,
             auto_trust=self.plugin_config.auto_trust_hub_services,
         )
-        return await self._resolve_layer_url(service_url, layer)
+        return await self._resolve_layer_url(service_url, layer), dataset
 
     async def _layer_fields(
         self, layer_url: str
@@ -731,16 +749,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         Reads ``{layer_url}?f=json``; when that body is unusable, the fields
         come from a one-row query and the metadata is ``{}``.
         """
-        # The format must travel as a query parameter: httpx replaces the
-        # URL's own query string with ``params``, so ``{url}?f=json`` plus
-        # ``params={}`` sent a bare request and ArcGIS answered with an HTML
-        # page ("Expecting value: line 1 column 1" on every dataset).
-        response = await self._call_feature_service(layer_url, {"f": "json"})
-
-        fields = self._fields_from_layer_metadata(response)
-        if fields is not None:
-            metadata = response.json()
-            return fields, metadata if isinstance(metadata, dict) else {}
+        metadata = await self._layer_metadata(layer_url)
+        if metadata is not None:
+            return metadata["fields"], metadata
         # Some self-hosted services return HTML or a malformed body on the
         # layer metadata endpoint while the query endpoint works (seen on
         # Columbus and Indianapolis). Derive the schema from a one-row query
@@ -750,6 +761,30 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             layer_url,
         )
         return await self._schema_from_query(layer_url), {}
+
+    async def _layer_metadata(self, layer_url: str) -> dict[str, Any] | None:
+        """Read ``{layer_url}?f=json``; ``None`` when the body is unusable.
+
+        Usable bodies (JSON with a ``fields`` list and no error envelope) are
+        cached per layer URL, so the data edit date is available to later
+        queries without another request.
+
+        Raises:
+            RuntimeError: On HTTP errors (via :meth:`_call_feature_service`).
+        """
+        cached = self._layer_metadata_cache.get(layer_url)
+        if cached is not None:
+            return cached
+        # The format must travel as a query parameter: httpx replaces the
+        # URL's own query string with ``params``, so ``{url}?f=json`` plus
+        # ``params={}`` sent a bare request and ArcGIS answered with an HTML
+        # page ("Expecting value: line 1 column 1" on every dataset).
+        response = await self._call_feature_service(layer_url, {"f": "json"})
+        if self._fields_from_layer_metadata(response) is None:
+            return None
+        metadata = response.json()
+        self._layer_metadata_cache[layer_url] = metadata
+        return metadata
 
     @staticmethod
     def _fields_from_layer_metadata(response: httpx.Response) -> list | None:
@@ -911,7 +946,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         sort = WhereValidator.validate_order_by(order_by)
         where_clause = WhereValidator.validate(where)
 
-        layer_url = await self._layer_url_for(dataset_id, layer, queryable_only=True)
+        layer_url, dataset = await self._layer_url_for(
+            dataset_id, layer, queryable_only=True
+        )
         query_url = f"{layer_url}/query"
         record_count = min(limit, 1000)
         params: dict[str, Any] = {
@@ -943,6 +980,11 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             "offset": offset,
             "total": total,
             "exceeded": exceeded,
+            # Only a cached layer description is used here, so the footer
+            # never costs an extra request.
+            "source": self._source(
+                dataset, layer_url, self._layer_metadata_cache.get(layer_url)
+            ),
         }
 
     @staticmethod
@@ -1059,7 +1101,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             raise ValueError("having must be a string")
         sort = WhereValidator.validate_order_by(order_by)
 
-        layer_url = await self._layer_url_for(dataset_id, layer, queryable_only=True)
+        layer_url, dataset = await self._layer_url_for(
+            dataset_id, layer, queryable_only=True
+        )
         fields, metadata = await self._layer_fields(layer_url)
         capabilities = metadata.get("advancedQueryCapabilities") or {}
         if capabilities.get("supportsStatistics") is False:
@@ -1137,6 +1181,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             "total_groups": len(rows),
             "layer_url": layer_url,
             "exceeded": bool(data.get("exceededTransferLimit")),
+            "source": self._source(dataset, layer_url, metadata),
         }
 
     @staticmethod
@@ -1451,13 +1496,39 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         self._service_layers_cache[service_root] = entries
         return entries
 
+    async def _add_service_details(self, dataset: dict[str, Any]) -> None:
+        """Add ``layers`` and the default layer's edit dates, for ``get_dataset``.
+
+        Sets ``dataset["layers"]`` (see :meth:`_dataset_layers`) and, when the
+        default layer's description can be read, ``dataLastEditDate`` and
+        ``schemaLastEditDate`` from its ``editingInfo``. Every lookup is
+        best-effort: ``get_dataset`` never fails because of them.
+        """
+        dataset["layers"] = await self._dataset_layers(dataset)
+        default = next((e for e in dataset["layers"] if e.get("default")), None)
+        if default is None:
+            return
+        layer_url = f"{default['root']}/{default['id']}"
+        try:
+            metadata = await self._layer_metadata(layer_url)
+        except Exception as exc:  # noqa: BLE001 - dates are optional
+            logger.warning("Could not read layer metadata for %s: %s", layer_url, exc)
+            return
+        editing = (metadata or {}).get("editingInfo") or {}
+        dataset["dataLastEditDate"] = self.short_date(
+            editing.get("dataLastEditDate") or editing.get("lastEditDate")
+        )
+        dataset["schemaLastEditDate"] = self.short_date(
+            editing.get("schemaLastEditDate")
+        )
+
     async def _dataset_layers(self, dataset: dict[str, Any]) -> list[dict[str, Any]]:
         """Layers and tables of a dataset's service, for ``get_dataset``.
 
-        Marks the entry that queries use by default with ``"default": True``.
-        Returns ``[]`` when the dataset has no service URL, the host is not
-        trusted, or the service description cannot be read; ``get_dataset``
-        still succeeds.
+        Marks the entry that queries use by default with ``"default": True``
+        and records the service root in ``"root"``. Returns ``[]`` when the
+        dataset has no service URL, the host is not trusted, or the service
+        description cannot be read; ``get_dataset`` still succeeds.
         """
         service_url = dataset.get("service_url")
         if not service_url:
@@ -1482,7 +1553,11 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             if match.group("layer") is not None
             else listed[0]["id"]
         )
-        return [{**entry, "default": entry["id"] == default_id} for entry in listed]
+        root = match.group("root")
+        return [
+            {**entry, "default": entry["id"] == default_id, "root": root}
+            for entry in listed
+        ]
 
     def _describe_layer(self, entry: dict[str, Any]) -> str:
         """Render one layer/table entry as ``1: SAFMR_table (table)``."""
@@ -1514,9 +1589,13 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
     @staticmethod
     def _extract_dataset_summary(props: dict[str, Any]) -> dict[str, Any]:
-        description = props.get("description", "") or ""
-        if len(description) > 300:
-            description = description[:300] + "..."
+        """Summarize a Hub item; the description is converted to plain text.
+
+        The description is kept whole: search results show a 300-character
+        excerpt and ``get_dataset`` the full text (up to
+        :data:`DESCRIPTION_MAX`), both applied at display time.
+        """
+        description = html_to_text(props.get("description"))
 
         return {
             "id": props.get("id", ""),
@@ -1608,6 +1687,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             ("Created", "created"),
             ("Modified", "modified"),
             ("Last edit", "lastEditDate"),
+            ("Data last edited", "dataLastEditDate"),
+            ("Schema last edited", "schemaLastEditDate"),
         ):
             value = self.short_date(dataset.get(key))
             if value:
@@ -1625,12 +1706,18 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             facts.append(f"Size: {size}")
         if facts:
             lines.append(" | ".join(facts))
-        add("License", self.portal_block(dataset.get("licenseInfo"), max_len=1000))
-        add("Access information", line(dataset.get("accessInformation")))
-        add("Snippet", line(dataset.get("snippet")))
-        lines.append(
-            f"Description: {self.portal_block(dataset.get('description'), default='No description')}"
+        add("License", self.portal_block(dataset.get("licenseInfo"), max_len=2000))
+        add(
+            "Access information",
+            self.portal_block(dataset.get("accessInformation"), max_len=2000),
         )
+        add("Snippet", line(dataset.get("snippet")))
+        description = self.portal_block(
+            dataset.get("description"),
+            max_len=DESCRIPTION_MAX,
+            default="No description",
+        )
+        lines.append(f"Description: {description}")
         add("Spatial Reference", line(dataset.get("spatialReference")))
         add("Geometry Type", line(dataset.get("geometryType")))
         add("Tags", join_cleaned(dataset.get("tags") or []))
@@ -1676,10 +1763,87 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             name = self.portal_line(field.get("name"), default="unknown")
             ftype = self.portal_line(field.get("type"), default="unknown")
             alias = self.portal_line(field.get("alias"))
-            lines.append(f"  • {name} ({ftype})")
+            length = field.get("length")
+            detail = f"{ftype}, length {length}" if isinstance(length, int) else ftype
+            lines.append(f"  • {name} ({detail})")
             if alias and alias != name:
                 lines.append(f"    Alias: {alias}")
+            domain = self._describe_domain(field.get("domain"))
+            if domain:
+                lines.append(f"    {domain}")
 
+        return "\n".join(lines)
+
+    def _describe_domain(self, domain: Any) -> str:
+        """Render a coded-value or range domain as one line (or ``""``)."""
+        if not isinstance(domain, dict):
+            return ""
+        if domain.get("type") == "range":
+            low, high = (list(domain.get("range") or []) + [None, None])[:2]
+            if low is None and high is None:
+                return ""
+            return f"Range: {self.portal_line(low)} to {self.portal_line(high)}"
+        values = domain.get("codedValues")
+        if not isinstance(values, list) or not values:
+            return ""
+        shown = []
+        for item in values[:_MAX_DOMAIN_VALUES]:
+            if not isinstance(item, dict):
+                continue
+            code = self.portal_line(item.get("code"), max_len=60)
+            label = self.portal_line(item.get("name"), max_len=100)
+            shown.append(f"{code} = {label}" if label and label != code else code)
+        text = "Values: " + "; ".join(shown)
+        if len(values) > _MAX_DOMAIN_VALUES:
+            text += f"; … and {len(values) - _MAX_DOMAIN_VALUES} more"
+        return text
+
+    def _source(
+        self,
+        dataset: dict[str, Any],
+        layer_url: str,
+        metadata: dict[str, Any] | None,
+    ) -> dict[str, str]:
+        """Collect the citation facts for a query result's source block."""
+        item_id = self.safe_id(dataset.get("id"))
+        editing = (metadata or {}).get("editingInfo") or {}
+        return {
+            "title": self.portal_line(dataset.get("title")),
+            "item_url": (
+                f"{self.plugin_config.portal_url.rstrip('/')}/datasets/{item_id}"
+                if dataset.get("id") and item_id == dataset.get("id")
+                else ""
+            ),
+            # Validated by _validate_feature_url before it was queried.
+            "layer_url": self.portal_line(layer_url, max_len=500),
+            "data_edited": self.short_date(
+                editing.get("dataLastEditDate") or editing.get("lastEditDate")
+            ),
+            "license": self.portal_line(dataset.get("licenseInfo"), max_len=200),
+            "retrieved": datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC"),
+        }
+
+    @staticmethod
+    def _format_source(source: dict[str, str] | None) -> str:
+        """Render the source block appended to query and aggregate results."""
+        if not source:
+            return ""
+        lines = ["Source:"]
+        title = source.get("title")
+        item_url = source.get("item_url")
+        if title or item_url:
+            lines.append(
+                "  Dataset: "
+                + (f"{title} ({item_url})" if title and item_url else title or item_url)
+            )
+        for label, key in (
+            ("Layer queried", "layer_url"),
+            ("Data last edited", "data_edited"),
+            ("License", "license"),
+            ("Retrieved", "retrieved"),
+        ):
+            if source.get(key):
+                lines.append(f"  {label}: {source[key]}")
         return "\n".join(lines)
 
     def _format_query_results(
@@ -1723,7 +1887,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                 f"\n\nMore records match. Next page: offset={next_offset} "
                 "with the same where, out_fields and order_by."
             )
-        return text
+        source = self._format_source(page.get("source"))
+        return f"{text}\n\n{source}" if source else text
 
     def _format_aggregate(self, result: dict[str, Any], *, fmt: str = "text") -> str:
         """Format an :meth:`aggregate_features` result."""
@@ -1742,7 +1907,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                 "\n\nThe service hit its transfer limit, so some groups are "
                 "missing. Narrow where or group by fewer fields."
             )
-        return text
+        source = self._format_source(result.get("source"))
+        return f"{text}\n\n{source}" if source else text
 
     def _format_aggregations(self, field: str, buckets: list[dict[str, Any]]) -> str:
         if not buckets:

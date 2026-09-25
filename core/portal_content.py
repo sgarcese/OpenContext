@@ -17,6 +17,8 @@ reaches the model:
   untrusted-data boundary and keeps the connector's own guidance *outside*
   that boundary, so instruction-shaped text inside the data region is
   never confused with the connector's voice.
+* :func:`html_to_text` turns the HTML that catalogs store in descriptions
+  and licence fields into plain text before it is cleaned.
 * :func:`detect_injection_markers` is a cheap heuristic scan used to tag
   suspicious output with a warning and emit a log line for operators.
 
@@ -27,10 +29,12 @@ operators visibility into poisoned records.
 
 from __future__ import annotations
 
+import html
 import logging
 import re
 import unicodedata
 from collections.abc import Iterable
+from html.parser import HTMLParser
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -189,6 +193,84 @@ def clean_text(
         omitted = len(text) - max_len
         text = text[:max_len] + TRUNCATION_SUFFIX.format(omitted=omitted)
     return text
+
+
+# Tags that start a new line in the plain-text rendering.
+_BLOCK_TAGS = frozenset(
+    {
+        "address", "article", "blockquote", "br", "dd", "div", "dl", "dt",
+        "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "hr", "li",
+        "ol", "p", "pre", "section", "table", "tr", "ul",
+    }
+)  # fmt: skip
+# Tags whose content is never shown.
+_HIDDEN_TAGS = frozenset({"head", "script", "style", "template", "title"})
+# Quick test for "this string contains markup".
+_LOOKS_LIKE_HTML = re.compile(r"<\s*/?\s*[A-Za-z][^>]*>|&(?:#\d+|#x[0-9A-Fa-f]+|\w+);")
+
+
+class _TextExtractor(HTMLParser):
+    """Collect the visible text of an HTML fragment, one block per line."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._hidden = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in _HIDDEN_TAGS:
+            self._hidden += 1
+        elif tag in _BLOCK_TAGS:
+            self.parts.append("\n")
+            if tag == "li":
+                self.parts.append("- ")
+        elif tag in ("td", "th"):
+            self.parts.append(" ")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _HIDDEN_TAGS:
+            self._hidden = max(0, self._hidden - 1)
+        elif tag in _BLOCK_TAGS and tag != "li":
+            # A list item's line ends when the next item or the list does,
+            # so consecutive items stay on adjacent lines.
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._hidden:
+            self.parts.append(data)
+
+
+def html_to_text(value: Any) -> str:
+    """Convert an HTML fragment to plain text; other text passes through.
+
+    Block elements (paragraphs, list items, headings, table rows, ``<br>``)
+    become line breaks, list items get a ``- `` bullet, ``<script>`` and
+    ``<style>`` content is dropped, entities are decoded, runs of spaces
+    collapse, and at most one blank line is kept between blocks. Strings
+    without markup are returned unchanged (apart from ``str()`` of
+    non-strings and ``None`` -> ``""``). The result is still untrusted and
+    should go through :func:`clean_text` before display.
+    """
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else str(value)
+    if not _LOOKS_LIKE_HTML.search(text):
+        return text
+    parser = _TextExtractor()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception:  # noqa: BLE001 - malformed markup: fall back to raw text
+        return html.unescape(re.sub(r"<[^>]*>", " ", text))
+    lines = [
+        re.sub(r"[ \t\f\v\u00a0]+", " ", line).strip()
+        for line in "".join(parser.parts).split("\n")
+    ]
+    out: list[str] = []
+    for line in lines:
+        if line or (out and out[-1]):
+            out.append(line)
+    return "\n".join(out).strip()
 
 
 def indent_continuation(text: str, prefix: str = "    ") -> str:
