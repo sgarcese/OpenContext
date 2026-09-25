@@ -186,10 +186,14 @@ plugins:
 
 | Tool | Description |
 |------|-------------|
-| `arcgis__search_datasets(q, limit)` | Search the Hub catalog |
-| `arcgis__get_dataset(dataset_id)` | Get metadata for a Hub item (32-char hex ID) |
-| `arcgis__get_aggregations(field, q)` | Facet counts for type, tags, categories, or access |
-| `arcgis__query_data(dataset_id, where, out_fields, limit)` | Query a Feature Service |
+| `arcgis__search_datasets(query, limit)` | Search the Hub catalog |
+| `arcgis__get_dataset(dataset_id)` | Get metadata for a Hub item: full description, data edit dates, and the service's layers and tables |
+| `arcgis__get_aggregations(field, query)` | Facet counts for type, tags, categories, or access |
+| `arcgis__get_schema(dataset_id, layer)` | Field names, types, aliases, lengths and domains for a layer or table |
+| `arcgis__query_data(dataset_id, layer, where, out_fields, limit, offset, order_by, format)` | Query a Feature Service; total match count, next-page offset, text/json/csv output |
+| `arcgis__aggregate_data(dataset_id, statistics, group_by, where, having, order_by, layer, limit, format)` | Server-side count/sum/avg/min/max/stddev, grouped by fields |
+
+See [BUILT_IN_PLUGINS.md](BUILT_IN_PLUGINS.md#arcgis-hub-plugin) for argument details.
 
 ### Built-in: Socrata
 
