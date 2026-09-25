@@ -159,17 +159,18 @@ class TestInitialization:
 
 
 class TestGetTools:
-    def test_get_tools_returns_five_tools(self, arcgis_config):
+    def test_get_tools_returns_six_tools(self, arcgis_config):
         plugin = ArcGISPlugin(arcgis_config)
         tools = plugin.get_tools()
 
-        assert len(tools) == 5
+        assert len(tools) == 6
         tool_names = [t.name for t in tools]
         assert "search_datasets" in tool_names
         assert "get_dataset" in tool_names
         assert "get_aggregations" in tool_names
         assert "get_schema" in tool_names
         assert "query_data" in tool_names
+        assert "aggregate_data" in tool_names
 
     def test_get_tools_uses_city_name_directly(self, arcgis_config):
         plugin = ArcGISPlugin(arcgis_config)

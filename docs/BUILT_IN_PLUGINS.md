@@ -88,6 +88,7 @@ plugins:
 | `arcgis__get_aggregations(field, q)`                                                  | Facet counts for type, tags, categories, or access            |
 | `arcgis__get_schema(dataset_id, layer)`                                               | Field names, types and aliases for a layer or table           |
 | `arcgis__query_data(dataset_id, layer, where, out_fields, limit, offset, order_by, format)` | Query a Feature Service, with paging and a total match count |
+| `arcgis__aggregate_data(dataset_id, statistics, group_by, where, having, order_by, layer, limit, format)` | Server-side count/sum/avg/min/max/stddev, grouped by fields |
 
 ### Usage Notes
 
@@ -95,6 +96,7 @@ plugins:
 - `get_aggregations` accepts `field` values: `"type"`, `"tags"`, `"categories"`, `"access"`. This is a catalog-level tool, not a DataPlugin method — it has no equivalent in other plugins.
 - `query_data` uses the ArcGIS Feature Service query interface. The `where` parameter is a SQL WHERE clause (e.g., `"population > 10000"`). Only Feature Layer, Feature Service, Map Service, and Table types are queryable.
 - `layer`: a Feature Service can hold several layers and tables. `get_dataset` lists them (`0: SAFMR_Zip_Code_Tab_Areas (polygon layer) [default]`, `1: SAFMR_table (table)`), and `get_schema`/`query_data` take `layer` to reach one other than the default. The default is the layer the item's URL names, otherwise the service's first layer (then first table). An id the service does not list is refused with the list of valid ids.
+- `aggregate_data` runs one `outStatistics` query instead of paging rows to sum them client-side. `statistics` is a list of `{"type": "sum", "field": "HCV_PUBLIC", "as": "vouchers"}` (types: count, sum, avg, min, max, stddev; a `count` without a field counts records by the object-id field), `group_by` a list of fields. Field names must exist in the layer's schema (matched case-insensitively); `where` and `having` go through the WHERE validator and `order_by` through the sort-order validator. Nulls are excluded from every statistic, so a sum over suppressed values is a lower bound. Layers that report `supportsStatistics: false` are refused with a pointer to `query_data`.
 - `query_data` paging: the reply starts with `Returned N of M matching record(s) (offset: O, limit: L)` and, when more records match, ends with `Next page: offset=…`. `offset` maps to `resultOffset` and `order_by` to `orderByFields` (field names, each optionally `ASC`/`DESC`; anything else is refused). Pass `order_by` for stable paging. The total comes from a `returnCountOnly` request, which is skipped when a first page comes back short of `limit`.
 - `query_data` output: `format` is `text` (default, `Record N:` blocks), `json` (an array with one object per line) or `csv` (a header row plus one line per record). Every returned record is shown; if the reply would pass the response size limit, whole records are dropped from the end, a `Showing N of M record(s)` notice is added, and the next offset accounts for it.
 
