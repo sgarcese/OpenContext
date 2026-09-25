@@ -15,6 +15,13 @@ from core.query_validator import BaseQueryValidator
 # A single-quoted SQL string literal, with '' as the escaped quote.
 _QUOTED_LITERAL = re.compile(r"'(?:[^']|'')*'")
 
+# One ORDER BY term: a plain field name, optionally followed by ASC or DESC.
+_ORDER_TERM = re.compile(
+    r"^([A-Za-z_][A-Za-z0-9_]{0,63})(?:\s+(ASC|DESC))?$", re.IGNORECASE
+)
+# Upper bound on ORDER BY terms; real queries use one or two.
+_MAX_ORDER_TERMS = 10
+
 
 class WhereValidator(BaseQueryValidator):
     """Validates WHERE clause strings for Feature Service queries.
@@ -54,3 +61,43 @@ class WhereValidator(BaseQueryValidator):
             raise ValueError(f"{forbidden} in WHERE clause")
 
         return where
+
+    @staticmethod
+    def validate_order_by(order_by: str | None) -> str | None:
+        """Validate an ``orderByFields`` value.
+
+        Accepts a comma-separated list of plain field names, each optionally
+        followed by ``ASC`` or ``DESC`` (e.g. ``"COUNTY, UNITS DESC"``).
+        Anything else (expressions, functions, quotes, comments) is refused,
+        so the value cannot carry SQL beyond a sort order.
+
+        Args:
+            order_by: The requested sort order, or ``None``/empty for none.
+
+        Returns:
+            The normalized sort order (``"A, B DESC"``), or ``None``.
+
+        Raises:
+            ValueError: If a term is not a field name with an optional
+                direction, or there are too many terms.
+        """
+        if order_by is None:
+            return None
+        if not isinstance(order_by, str):
+            raise ValueError("order_by must be a string")
+        if not order_by.strip():
+            return None
+        terms = [t.strip() for t in order_by.split(",")]
+        if len(terms) > _MAX_ORDER_TERMS:
+            raise ValueError(f"order_by accepts at most {_MAX_ORDER_TERMS} fields")
+        normalized = []
+        for term in terms:
+            match = _ORDER_TERM.match(term)
+            if not match:
+                raise ValueError(
+                    f"Invalid order_by term {term[:80]!r}: use a field name, "
+                    "optionally followed by ASC or DESC"
+                )
+            field, direction = match.groups()
+            normalized.append(f"{field} {direction.upper()}" if direction else field)
+        return ", ".join(normalized)

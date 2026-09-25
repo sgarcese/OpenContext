@@ -38,6 +38,16 @@ def _mock_response(json_data, status_code=200, text=None, content_type=None):
     return mock
 
 
+def _page(records, *, offset=0, total=None, exceeded=False):
+    """Build a ``_query_page`` result; ``total`` defaults to the row count."""
+    return {
+        "records": records,
+        "offset": offset,
+        "total": len(records) if total is None else total,
+        "exceeded": exceeded,
+    }
+
+
 # ── Plugin attributes ──────────────────────────────────────────────────
 
 
@@ -280,9 +290,9 @@ class TestExecuteTool:
 
         with patch.object(
             plugin,
-            "_query_features",
+            "_query_page",
             new_callable=AsyncMock,
-            return_value=[{"name": "Park A", "status": "Open"}],
+            return_value=_page([{"name": "Park A", "status": "Open"}]),
         ) as mock_qf:
             result = await plugin.execute_tool(
                 "query_data",
@@ -296,7 +306,14 @@ class TestExecuteTool:
 
         assert result.success is True
         assert len(result.content) > 0
-        mock_qf.assert_called_once_with("abc123", "status = 'Open'", "name,status", 50)
+        mock_qf.assert_called_once_with(
+            "abc123",
+            "status = 'Open'",
+            "name,status",
+            50,
+            offset=0,
+            order_by=None,
+        )
 
     @pytest.mark.asyncio
     async def test_execute_tool_query_data_defaults(self, arcgis_config):
@@ -304,14 +321,16 @@ class TestExecuteTool:
 
         with patch.object(
             plugin,
-            "_query_features",
+            "_query_page",
             new_callable=AsyncMock,
-            return_value=[{"name": "Park A"}],
+            return_value=_page([{"name": "Park A"}]),
         ) as mock_qf:
             result = await plugin.execute_tool("query_data", {"dataset_id": "abc123"})
 
         assert result.success is True
-        mock_qf.assert_called_once_with("abc123", "1=1", "*", 100)
+        mock_qf.assert_called_once_with(
+            "abc123", "1=1", "*", 100, offset=0, order_by=None
+        )
 
     async def test_execute_tool_query_data_renders_every_returned_record(
         self, arcgis_config
@@ -321,7 +340,7 @@ class TestExecuteTool:
         rows = [{"PROJECT": f"P{i}", "LI_UNITS": i} for i in range(39)]
 
         with patch.object(
-            plugin, "_query_features", new_callable=AsyncMock, return_value=rows
+            plugin, "_query_page", new_callable=AsyncMock, return_value=_page(rows)
         ):
             result = await plugin.execute_tool(
                 "query_data",
@@ -335,7 +354,7 @@ class TestExecuteTool:
 
         text = result.content[0]["text"]
         assert result.success is True
-        assert "Returned 39 record(s) (limit: 50):" in text
+        assert "Returned 39 of 39 matching record(s) (offset: 0, limit: 50):" in text
         assert "Record 39:" in text
         assert "PROJECT: P38" in text
         assert "more record" not in text
@@ -1195,8 +1214,8 @@ class TestCodeReviewFixes:
         from plugins.arcgis.plugin import ArcGISPlugin
 
         plugin = ArcGISPlugin(self._config())
-        records = [{"a": i} for i in range(50)]
-        text = plugin._format_query_results(records, limit=1000)
+        page = {"records": [{"a": i} for i in range(50)], "offset": 0, "total": 50}
+        text = plugin._format_query_results(page, limit=1000)
         assert "Record 50:" in text
         assert "more record" not in text
 

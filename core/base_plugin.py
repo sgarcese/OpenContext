@@ -8,6 +8,9 @@ subclass it, declare ``config_class`` and ``tool_handlers()``, and implement
 the remaining ``DataPlugin`` abstract methods.
 """
 
+import csv
+import io
+import json
 import logging
 import re
 from collections.abc import Callable, Iterable
@@ -50,6 +53,9 @@ _ISO_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}")
 # framed) so the header and the truncation notice are never the part cut off,
 # and records are dropped whole instead of being cut mid-value.
 RECORDS_BUDGET = DEFAULT_MAX_RESPONSE - 2_000
+
+# Output formats accepted by ``render_rows``.
+ROW_FORMATS = ("text", "json", "csv")
 
 # Hostname safe to echo back to the model when a URL's host is untrusted.
 _SAFE_HOSTNAME = re.compile(r"^[a-z0-9]([a-z0-9-]{0,62}\.)*[a-z0-9-]{1,63}$")
@@ -555,43 +561,155 @@ class BaseOpenDataPlugin(DataPlugin):
         if not records:
             return "No records found."
 
-        lines: list[str] = []
-        if header:
-            lines.append(header)
-            lines.append("")
+        subset = records if max_display is None else records[: max(0, max_display)]
+        text, shown = self.render_rows(
+            subset,
+            "text",
+            header=header,
+            skip_keys=skip_keys,
+            max_chars=max_chars,
+            total=len(records),
+        )
+        if shown == len(subset) and len(records) > shown:
+            text += f"\n... and {len(records) - shown} more record(s)"
+        return text
 
-        limit = len(records) if max_display is None else max(0, max_display)
-        used = sum(len(line) + 1 for line in lines)
-        shown = 0
-        for i, record in enumerate(records[:limit], 1):
-            block = [f"Record {i}:"]
-            for key, value in record.items():
-                if key in skip_keys:
-                    continue
-                # Keys stay on one line; values keep their newlines but every
-                # continuation line is indented so a value cannot forge a
-                # top-level "Record N:" header or a connector instruction.
-                safe_key = self.portal_line(key, default="(empty)")
-                safe_value = indent_continuation(self.portal_text(value))
-                block.append(f"  {safe_key}: {safe_value}")
-            block.append("")
-            size = sum(len(line) + 1 for line in block)
-            if shown and used + size > max_chars:
-                break
-            lines.extend(block)
-            used += size
-            shown += 1
+    def render_rows(
+        self,
+        records: list[dict[str, Any]],
+        fmt: str = "text",
+        *,
+        header: str | None = None,
+        skip_keys: frozenset = frozenset({"_id"}),
+        max_chars: int = RECORDS_BUDGET,
+        total: int | None = None,
+    ) -> tuple[str, int]:
+        """Render records as text blocks, a JSON array, or CSV.
 
-        if shown < min(limit, len(records)):
-            lines.append(
-                f"Showing {shown} of {len(records)} record(s); the rest did not "
-                "fit in the response size limit. Request fewer records or "
-                "fields to see them."
+        ``text`` is the ``Record N:`` layout of :meth:`format_records`.
+        ``json`` is an array with one object per line; ``csv`` is a header
+        row plus one line per record, with columns in first-seen order.
+        Keys and string values are cleaned as portal content (CSV values are
+        kept on one line). Whole records are dropped from the end once the
+        output would exceed ``max_chars``, followed by a ``Showing N of M``
+        notice; at least one record is always rendered.
+
+        Args:
+            records: Record dictionaries to render.
+            fmt: One of :data:`ROW_FORMATS`.
+            header: Optional leading header line.
+            skip_keys: Record keys to omit from the output.
+            max_chars: Character budget for the rendered output.
+            total: Record count to report in the notice; defaults to
+                ``len(records)``.
+
+        Returns:
+            ``(text, shown)``: the rendered output and how many records it
+            contains.
+
+        Raises:
+            ValueError: If ``fmt`` is not a supported format.
+        """
+        if fmt not in ROW_FORMATS:
+            raise ValueError(
+                f"format must be one of {', '.join(ROW_FORMATS)} (got {fmt!r})"
             )
-        elif len(records) > shown:
-            lines.append(f"... and {len(records) - shown} more record(s)")
 
-        return "\n".join(lines)
+        lines: list[str] = [header, ""] if header else []
+        used = sum(len(line) + 1 for line in lines)
+
+        if fmt == "text":
+            pieces = [
+                self._record_block(i, r, skip_keys) for i, r in enumerate(records, 1)
+            ]
+        else:
+            columns: list[str] = []
+            for record in records:
+                columns.extend(
+                    k for k in record if k not in skip_keys and k not in columns
+                )
+            names = [self.portal_line(c, default="(empty)") for c in columns]
+            if fmt == "json":
+                pieces = [
+                    json.dumps(
+                        {
+                            name: self._json_value(record[col])
+                            for col, name in zip(columns, names, strict=True)
+                            if col in record
+                        },
+                        ensure_ascii=False,
+                    )
+                    for record in records
+                ]
+            else:
+                pieces = [
+                    self._csv_line(
+                        [
+                            ""
+                            if record.get(col) is None
+                            else self.portal_line(record[col], max_len=DEFAULT_MAX_TEXT)
+                            for col in columns
+                        ]
+                    )
+                    for record in records
+                ]
+                head = self._csv_line(names)
+                lines.append(head)
+                used += len(head) + 1
+
+        kept: list[str] = []
+        for piece in pieces:
+            size = len(piece) + 2
+            if kept and used + size > max_chars:
+                break
+            kept.append(piece)
+            used += size
+
+        if fmt == "text":
+            lines.extend(kept)
+        elif fmt == "json":
+            lines.extend(["[", ",\n".join(kept), "]"])
+        else:
+            lines.extend(kept)
+
+        shown = len(kept)
+        if shown < len(records):
+            lines.append(
+                f"Showing {shown} of {total if total is not None else len(records)} "
+                "record(s); the rest did not fit in the response size limit. "
+                "Request fewer records or fields to see them."
+            )
+        return "\n".join(lines), shown
+
+    def _record_block(
+        self, index: int, record: dict[str, Any], skip_keys: frozenset
+    ) -> str:
+        """Render one ``Record N:`` block (ends with a blank line)."""
+        block = [f"Record {index}:"]
+        for key, value in record.items():
+            if key in skip_keys:
+                continue
+            # Keys stay on one line; values keep their newlines but every
+            # continuation line is indented so a value cannot forge a
+            # top-level "Record N:" header or a connector instruction.
+            safe_key = self.portal_line(key, default="(empty)")
+            safe_value = indent_continuation(self.portal_text(value))
+            block.append(f"  {safe_key}: {safe_value}")
+        block.append("")
+        return "\n".join(block)
+
+    def _json_value(self, value: Any) -> Any:
+        """Keep JSON scalars as-is; clean strings and anything else as text."""
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        return self.portal_text(value)
+
+    @staticmethod
+    def _csv_line(values: list[str]) -> str:
+        """Render one CSV row (RFC 4180 quoting, no line terminator)."""
+        buffer = io.StringIO()
+        csv.writer(buffer, lineterminator="").writerow(values)
+        return buffer.getvalue()
 
     @staticmethod
     def build_where_clause(filters: dict[str, Any]) -> str:
