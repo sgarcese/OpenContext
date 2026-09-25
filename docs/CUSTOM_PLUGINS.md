@@ -66,7 +66,7 @@ are all written this way.
 | `_create_http_client(**kwargs)` | Creates an `httpx.AsyncClient` that the base tracks and closes for you in `shutdown()` |
 | `HTTP_RETRY` | Decorator adding exponential-backoff retries (3 attempts) for transient HTTP errors |
 | `_raise_http_error(exc, context)` | Translates `httpx.HTTPStatusError` into a user-readable `RuntimeError`, extracting portal error messages when present |
-| `format_records(records, max_display=10, header=None, skip_keys=...)` | Renders query results in the standard `Record N:` style, capped with `... and X more record(s)` |
+| `format_records(records, max_display=None, header=None, skip_keys=..., max_chars=RECORDS_BUDGET)` | Renders query results in the standard `Record N:` style. Shows every record unless `max_display` asks for fewer (`... and X more record(s)`) or the output would pass the response size budget, in which case whole records are dropped and a `Showing N of M record(s)` notice is added |
 | `build_where_clause(filters)` | Builds a SQL `WHERE` body from a filter dict; escapes string values and **validates field names as plain identifiers** so SQL cannot be smuggled in through keys |
 
 ### Minimal example

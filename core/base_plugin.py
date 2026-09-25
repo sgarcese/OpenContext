@@ -27,6 +27,7 @@ from core.config_base import BasePluginConfig
 from core.interfaces import DataPlugin, ToolResult
 from core.portal_content import (
     DEFAULT_MAX_LINE,
+    DEFAULT_MAX_RESPONSE,
     DEFAULT_MAX_TEXT,
     clean_error_message,
     clean_text,
@@ -43,6 +44,13 @@ _SAFE_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,63}$")
 
 # ``YYYY-MM-DD`` prefix of an ISO-8601 timestamp.
 _ISO_DATE_PREFIX = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+# Character budget for the record blocks rendered by ``format_records``. It
+# stays below ``DEFAULT_MAX_RESPONSE`` (the cap applied when the output is
+# framed) so the header and the truncation notice are never the part cut off,
+# and records are dropped whole instead of being cut mid-value.
+RECORDS_BUDGET = DEFAULT_MAX_RESPONSE - 2_000
+
 # Hostname safe to echo back to the model when a URL's host is untrusted.
 _SAFE_HOSTNAME = re.compile(r"^[a-z0-9]([a-z0-9-]{0,62}\.)*[a-z0-9-]{1,63}$")
 
@@ -519,21 +527,27 @@ class BaseOpenDataPlugin(DataPlugin):
         self,
         records: list[dict[str, Any]],
         *,
-        max_display: int = 10,
+        max_display: int | None = None,
         header: str | None = None,
         skip_keys: frozenset = frozenset({"_id"}),
+        max_chars: int = RECORDS_BUDGET,
     ) -> str:
         """Format a list of record dicts for user display.
 
-        Replicates the ``Record N:`` style used by the existing plugins, with
-        a ``... and X more record(s)`` suffix and a ``No records found.``
-        empty case.
+        Renders ``Record N:`` blocks with a ``No records found.`` empty case.
+        Every record is rendered unless ``max_display`` asks for fewer or the
+        output would exceed ``max_chars``. In the second case whole records
+        are dropped from the end and a notice says how many were shown, so
+        the caller never sees a record cut in half. At least one record is
+        always rendered.
 
         Args:
             records: List of record dictionaries.
-            max_display: Maximum number of records to render in full.
+            max_display: Maximum number of records to render in full;
+                ``None`` renders all of them (subject to ``max_chars``).
             header: Optional leading header line (e.g. ``"Found N record(s)"``).
             skip_keys: Record keys to omit from the output.
+            max_chars: Character budget for the rendered output.
 
         Returns:
             Formatted string.
@@ -546,8 +560,11 @@ class BaseOpenDataPlugin(DataPlugin):
             lines.append(header)
             lines.append("")
 
-        for i, record in enumerate(records[:max_display], 1):
-            lines.append(f"Record {i}:")
+        limit = len(records) if max_display is None else max(0, max_display)
+        used = sum(len(line) + 1 for line in lines)
+        shown = 0
+        for i, record in enumerate(records[:limit], 1):
+            block = [f"Record {i}:"]
             for key, value in record.items():
                 if key in skip_keys:
                     continue
@@ -556,11 +573,23 @@ class BaseOpenDataPlugin(DataPlugin):
                 # top-level "Record N:" header or a connector instruction.
                 safe_key = self.portal_line(key, default="(empty)")
                 safe_value = indent_continuation(self.portal_text(value))
-                lines.append(f"  {safe_key}: {safe_value}")
-            lines.append("")
+                block.append(f"  {safe_key}: {safe_value}")
+            block.append("")
+            size = sum(len(line) + 1 for line in block)
+            if shown and used + size > max_chars:
+                break
+            lines.extend(block)
+            used += size
+            shown += 1
 
-        if len(records) > max_display:
-            lines.append(f"... and {len(records) - max_display} more record(s)")
+        if shown < min(limit, len(records)):
+            lines.append(
+                f"Showing {shown} of {len(records)} record(s); the rest did not "
+                "fit in the response size limit. Request fewer records or "
+                "fields to see them."
+            )
+        elif len(records) > shown:
+            lines.append(f"... and {len(records) - shown} more record(s)")
 
         return "\n".join(lines)
 

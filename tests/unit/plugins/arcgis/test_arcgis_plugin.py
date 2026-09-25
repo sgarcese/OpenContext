@@ -313,6 +313,33 @@ class TestExecuteTool:
         assert result.success is True
         mock_qf.assert_called_once_with("abc123", "1=1", "*", 100)
 
+    async def test_execute_tool_query_data_renders_every_returned_record(
+        self, arcgis_config
+    ):
+        """Issue #28: 39 rows under limit 50 must all render, not the first 10."""
+        plugin = ArcGISPlugin(arcgis_config)
+        rows = [{"PROJECT": f"P{i}", "LI_UNITS": i} for i in range(39)]
+
+        with patch.object(
+            plugin, "_query_features", new_callable=AsyncMock, return_value=rows
+        ):
+            result = await plugin.execute_tool(
+                "query_data",
+                {
+                    "dataset_id": "810ccb34dd464ec4ad4697d35fff21a5",
+                    "where": "COUNTY_LEVEL='18141'",
+                    "out_fields": "PROJECT,LI_UNITS",
+                    "limit": 50,
+                },
+            )
+
+        text = result.content[0]["text"]
+        assert result.success is True
+        assert "Returned 39 record(s) (limit: 50):" in text
+        assert "Record 39:" in text
+        assert "PROJECT: P38" in text
+        assert "more record" not in text
+
     @pytest.mark.asyncio
     async def test_execute_tool_get_aggregations(self, arcgis_config):
         plugin = ArcGISPlugin(arcgis_config)
@@ -1164,15 +1191,14 @@ class TestCodeReviewFixes:
         result = await plugin.execute_tool("search_datasets", {"q": "crime"})
         assert result.success is False
 
-    def test_format_query_results_caps_display(self):
+    def test_format_query_results_shows_every_record(self):
         from plugins.arcgis.plugin import ArcGISPlugin
 
         plugin = ArcGISPlugin(self._config())
         records = [{"a": i} for i in range(50)]
         text = plugin._format_query_results(records, limit=1000)
-        assert "Record 10:" in text
-        assert "Record 11:" not in text
-        assert "... and 40 more record(s)" in text
+        assert "Record 50:" in text
+        assert "more record" not in text
 
 
 class TestMetadataEnrichment:
