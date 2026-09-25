@@ -943,7 +943,8 @@ class TestFormatMethods:
         fields = [{"id": "id"}, {"id": "name"}]
         result = plugin._format_sql_results(records, fields)
         assert "SQL Query Results" in result
-        assert "5 more" in result
+        assert "Record 15:" in result
+        assert "more record" not in result
 
     def test_format_categories_empty(self, plugin):
         result = plugin._format_categories([])
