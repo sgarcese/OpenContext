@@ -81,18 +81,20 @@ plugins:
 
 ### Tools
 
-| Tool                                                       | Description                                        |
-| ---------------------------------------------------------- | -------------------------------------------------- |
-| `arcgis__search_datasets(q, limit)`                        | Search the Hub catalog                             |
-| `arcgis__get_dataset(dataset_id)`                          | Get metadata for a Hub item (32-char hex ID)       |
-| `arcgis__get_aggregations(field, q)`                       | Facet counts for type, tags, categories, or access |
-| `arcgis__query_data(dataset_id, where, out_fields, limit)` | Query a Feature Service                            |
+| Tool                                                                                  | Description                                                   |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| `arcgis__search_datasets(q, limit)`                                                   | Search the Hub catalog                                        |
+| `arcgis__get_dataset(dataset_id)`                                                     | Get metadata for a Hub item (32-char hex ID)                  |
+| `arcgis__get_aggregations(field, q)`                                                  | Facet counts for type, tags, categories, or access            |
+| `arcgis__query_data(dataset_id, where, out_fields, limit, offset, order_by, format)` | Query a Feature Service, with paging and a total match count |
 
 ### Usage Notes
 
 - `get_dataset` returns the Hub item metadata. Check that the item has a queryable `serviceUrl` before calling `query_data`.
 - `get_aggregations` accepts `field` values: `"type"`, `"tags"`, `"categories"`, `"access"`. This is a catalog-level tool, not a DataPlugin method — it has no equivalent in other plugins.
 - `query_data` uses the ArcGIS Feature Service query interface. The `where` parameter is a SQL WHERE clause (e.g., `"population > 10000"`). Only Feature Layer, Feature Service, Map Service, and Table types are queryable.
+- `query_data` paging: the reply starts with `Returned N of M matching record(s) (offset: O, limit: L)` and, when more records match, ends with `Next page: offset=…`. `offset` maps to `resultOffset` and `order_by` to `orderByFields` (field names, each optionally `ASC`/`DESC`; anything else is refused). Pass `order_by` for stable paging. The total comes from a `returnCountOnly` request, which is skipped when a first page comes back short of `limit`.
+- `query_data` output: `format` is `text` (default, `Record N:` blocks), `json` (an array with one object per line) or `csv` (a header row plus one line per record). Every returned record is shown; if the reply would pass the response size limit, whole records are dropped from the end, a `Showing N of M record(s)` notice is added, and the next offset accounts for it.
 
 ### Implementation Notes
 

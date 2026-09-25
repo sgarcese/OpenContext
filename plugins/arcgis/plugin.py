@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from core.base_plugin import HTTP_RETRY, BaseOpenDataPlugin, ToolHandler
+from core.base_plugin import HTTP_RETRY, ROW_FORMATS, BaseOpenDataPlugin, ToolHandler
 from core.interfaces import PluginType, ToolDefinition, ToolResult
 from core.portal_content import join_cleaned
 from plugins.arcgis.config_schema import ArcGISPluginConfig
@@ -40,7 +40,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
     plugin_name = "arcgis"
     plugin_type = PluginType.OPEN_DATA
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
 
     config_class = ArcGISPluginConfig
     # Hub item IDs are 32-char hex; allow the underscore/hyphen variants seen
@@ -254,7 +254,10 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                     "Query records from an ArcGIS Feature Service. Provide the Hub "
                     "dataset ID — the plugin resolves the Feature Service URL "
                     "automatically (two-hop). Use get_dataset first to confirm the "
-                    "dataset has a queryable service URL."
+                    "dataset has a queryable service URL. The reply gives the "
+                    "total number of matching records and, when more remain, the "
+                    "offset for the next page. Use format json or csv for rows "
+                    "you will compute with, and order_by for stable paging."
                 ),
                 input_schema={
                     "type": "object",
@@ -279,6 +282,33 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                             "default": 100,
                             "minimum": 1,
                             "maximum": 1000,
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": (
+                                "Number of matching records to skip, for paging "
+                                "(default: 0)"
+                            ),
+                            "default": 0,
+                            "minimum": 0,
+                        },
+                        "order_by": {
+                            "type": "string",
+                            "description": (
+                                "Comma-separated field names to sort by, each "
+                                'optionally followed by ASC or DESC (e.g. "COUNTY, '
+                                'UNITS DESC")'
+                            ),
+                        },
+                        "format": {
+                            "type": "string",
+                            "enum": list(ROW_FORMATS),
+                            "description": (
+                                "Output format: text (readable records, default), "
+                                "json (array of objects), or csv (header plus one "
+                                "line per record)"
+                            ),
+                            "default": "text",
                         },
                     },
                     "required": ["dataset_id"],
@@ -366,10 +396,22 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         where = arguments.get("where", "1=1")
         out_fields = arguments.get("out_fields", "*")
         limit = arguments.get("limit", 100)
-        records = await self._query_features(dataset_id, where, out_fields, limit)
+        offset = arguments.get("offset", 0)
+        order_by = arguments.get("order_by")
+        fmt = arguments.get("format") or "text"
+        if fmt not in ROW_FORMATS:
+            raise ValueError(
+                f"format must be one of {', '.join(ROW_FORMATS)} (got {fmt!r})"
+            )
+        page = await self._query_page(
+            dataset_id, where, out_fields, limit, offset=offset, order_by=order_by
+        )
         return ToolResult(
             content=[
-                {"type": "text", "text": self._format_query_results(records, limit)}
+                {
+                    "type": "text",
+                    "text": self._format_query_results(page, limit, fmt=fmt),
+                }
             ],
             success=True,
         )
@@ -615,8 +657,51 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         Returns:
             List of feature attribute dicts
         """
-        if limit < 1:
+        page = await self._query_page(
+            dataset_id, where, out_fields, limit, with_count=False
+        )
+        return page["records"]
+
+    async def _query_page(
+        self,
+        dataset_id: str,
+        where: str,
+        out_fields: str,
+        limit: int,
+        *,
+        offset: int = 0,
+        order_by: str | None = None,
+        with_count: bool = True,
+    ) -> dict[str, Any]:
+        """Query one page of records, with the total match count.
+
+        Resolves the Feature Service URL (two-hop), validates ``where`` and
+        ``order_by``, and sends ``resultOffset``/``orderByFields`` when
+        given. The total comes from a ``returnCountOnly`` request on the
+        same WHERE clause; it is skipped when the page itself proves the
+        total (a first page that came back short of ``limit`` with no
+        transfer-limit flag).
+
+        Args:
+            dataset_id: Hub item ID.
+            where: SQL WHERE clause (validated via :class:`WhereValidator`).
+            out_fields: Comma-separated field names to return.
+            limit: Maximum number of records (capped at 1000).
+            offset: Matching records to skip.
+            order_by: Sort order (validated via
+                :meth:`WhereValidator.validate_order_by`).
+            with_count: Whether to look up the total match count.
+
+        Returns:
+            ``{"records", "offset", "total", "exceeded"}``, where ``total`` is
+            ``None`` when unknown and ``exceeded`` mirrors the service's
+            ``exceededTransferLimit`` flag.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
             raise ValueError(f"limit must be at least 1 (got {limit})")
+        if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
+            raise ValueError(f"offset must be a non-negative integer (got {offset})")
+        sort = WhereValidator.validate_order_by(order_by)
 
         dataset = await self.get_dataset(dataset_id)
         service_url = dataset.get("service_url")
@@ -642,16 +727,45 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         service_url = await self._resolve_layer_url(service_url)
         query_url = f"{service_url}/query"
         record_count = min(limit, 1000)
-        params = {
+        params: dict[str, Any] = {
             "where": where_clause,
             "outFields": out_fields,
             "resultRecordCount": record_count,
             "f": "json",
             "returnGeometry": "false",
         }
+        if offset:
+            params["resultOffset"] = offset
+        if sort:
+            params["orderByFields"] = sort
 
-        response = await self._call_feature_service(query_url, params)
+        data = self._query_json(await self._call_feature_service(query_url, params))
+        features = data.get("features") or []
+        records = [f.get("attributes", {}) for f in features]
+        exceeded = bool(data.get("exceededTransferLimit"))
 
+        total: int | None = None
+        if with_count:
+            if offset == 0 and len(records) < record_count and not exceeded:
+                total = len(records)
+            else:
+                total = await self._count_features(query_url, where_clause)
+
+        return {
+            "records": records,
+            "offset": offset,
+            "total": total,
+            "exceeded": exceeded,
+        }
+
+    @staticmethod
+    def _query_json(response: httpx.Response) -> dict[str, Any]:
+        """Parse a Feature Service ``/query`` response, raising on errors.
+
+        Raises:
+            ValueError: If the body is not JSON.
+            RuntimeError: If the body is an ArcGIS error envelope.
+        """
         try:
             data = response.json()
         except Exception as json_err:
@@ -662,7 +776,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                 f"point to a queryable ArcGIS Feature Service."
             ) from json_err
 
-        error_in_body = data.get("error")
+        error_in_body = data.get("error") if isinstance(data, dict) else None
         if error_in_body:
             code = error_in_body.get("code", "unknown")
             msg = error_in_body.get("message", "Unknown error")
@@ -672,12 +786,24 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                 f"Feature Service query failed (code {code}): {msg}"
                 + (f" — {detail_str}" if detail_str else "")
             )
+        return data if isinstance(data, dict) else {}
 
-        features = data.get("features", [])
-        if not features:
-            return []
+    async def _count_features(self, query_url: str, where: str) -> int | None:
+        """Return how many records match ``where``, or ``None`` if unknown.
 
-        return [f.get("attributes", {}) for f in features]
+        A failed count does not fail the query; the page is still returned
+        without a total.
+        """
+        params = {"where": where, "returnCountOnly": "true", "f": "json"}
+        try:
+            response = await self._call_feature_service(query_url, params)
+            count = response.json().get("count")
+        except Exception as exc:  # noqa: BLE001 - the count is best-effort
+            logger.warning("Record count query failed for %s: %s", query_url, exc)
+            return None
+        if isinstance(count, bool) or not isinstance(count, int):
+            return None
+        return count
 
     # ── Aggregations (standalone helper, not a DataPlugin method) ───────
 
@@ -1068,16 +1194,48 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
         return "\n".join(lines)
 
-    def _format_query_results(self, records: list[dict[str, Any]], limit: int) -> str:
+    def _format_query_results(
+        self, page: dict[str, Any], limit: int, *, fmt: str = "text"
+    ) -> str:
+        """Format a :meth:`_query_page` result with totals and paging hints.
+
+        Args:
+            page: ``{"records", "offset", "total", "exceeded"}``.
+            limit: The requested ``limit``.
+            fmt: Output format, one of :data:`ROW_FORMATS`.
+        """
+        records = page.get("records") or []
+        offset = page.get("offset", 0)
+        total = page.get("total")
         if not records:
+            if total:
+                return (
+                    f"No records returned at offset {offset}; "
+                    f"{total} record(s) match in total."
+                )
             return "No records returned."
 
+        window = f"(offset: {offset}, limit: {limit})"
+        if total is not None:
+            header = f"Returned {len(records)} of {total} matching record(s) {window}:"
+        else:
+            header = f"Returned {len(records)} record(s) {window}:"
+
         # ArcGIS records have no internal _id key to skip.
-        return self.format_records(
-            records,
-            header=f"Returned {len(records)} record(s) (limit: {limit}):",
-            skip_keys=frozenset(),
+        text, shown = self.render_rows(
+            records, fmt, header=header, skip_keys=frozenset()
         )
+        next_offset = offset + shown
+        if total is not None:
+            more = next_offset < total
+        else:
+            more = shown < len(records) or bool(page.get("exceeded"))
+        if more:
+            text += (
+                f"\n\nMore records match. Next page: offset={next_offset} "
+                "with the same where, out_fields and order_by."
+            )
+        return text
 
     def _format_aggregations(self, field: str, buckets: list[dict[str, Any]]) -> str:
         if not buckets:

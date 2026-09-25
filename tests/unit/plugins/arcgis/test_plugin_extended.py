@@ -669,12 +669,13 @@ class TestFormatSearchResults:
 class TestFormatQueryResults:
     def test_returns_no_records_message(self, initialized_plugin):
         assert (
-            initialized_plugin._format_query_results([], 100) == "No records returned."
+            initialized_plugin._format_query_results({"records": []}, 100)
+            == "No records returned."
         )
 
     def test_formats_records(self, initialized_plugin):
-        records = [{"name": "Central Park", "type": "park"}]
-        result = initialized_plugin._format_query_results(records, 10)
+        page = {"records": [{"name": "Central Park", "type": "park"}], "offset": 0}
+        result = initialized_plugin._format_query_results(page, 10)
         assert "Record 1" in result
         assert "Central Park" in result
 
