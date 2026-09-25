@@ -83,16 +83,16 @@ plugins:
 
 | Tool                                                                                  | Description                                                   |
 | ------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
-| `arcgis__search_datasets(q, limit)`                                                   | Search the Hub catalog                                        |
+| `arcgis__search_datasets(query, limit)`                                                   | Search the Hub catalog                                        |
 | `arcgis__get_dataset(dataset_id)`                                                     | Get metadata for a Hub item, with its service's layers/tables |
-| `arcgis__get_aggregations(field, q)`                                                  | Facet counts for type, tags, categories, or access            |
-| `arcgis__get_schema(dataset_id, layer)`                                               | Field names, types and aliases for a layer or table           |
+| `arcgis__get_aggregations(field, query)`                                                  | Facet counts for type, tags, categories, or access            |
+| `arcgis__get_schema(dataset_id, layer)`                                               | Field names, types, aliases, lengths and domains for a layer or table |
 | `arcgis__query_data(dataset_id, layer, where, out_fields, limit, offset, order_by, format)` | Query a Feature Service, with paging and a total match count |
 | `arcgis__aggregate_data(dataset_id, statistics, group_by, where, having, order_by, layer, limit, format)` | Server-side count/sum/avg/min/max/stddev, grouped by fields |
 
 ### Usage Notes
 
-- `get_dataset` returns the Hub item metadata. Check that the item has a queryable `serviceUrl` before calling `query_data`.
+- `get_dataset` returns the Hub item metadata. Check that the item has a `Service URL` before calling `query_data`, and use the listed layer ids with `layer`.
 - `get_aggregations` accepts `field` values: `"type"`, `"tags"`, `"categories"`, `"access"`. This is a catalog-level tool, not a DataPlugin method — it has no equivalent in other plugins.
 - `query_data` uses the ArcGIS Feature Service query interface. The `where` parameter is a SQL WHERE clause (e.g., `"population > 10000"`). Only Feature Layer, Feature Service, Map Service, and Table types are queryable.
 - Metadata: `get_dataset` shows the full description as plain text (HTML converted, capped at 12,000 characters with a truncation notice; search results keep a 300-character excerpt), the licence and access information as text, and the default layer's `Data last edited` / `Schema last edited` dates from its `editingInfo`. `get_schema` adds the length of string fields and coded-value or range domains when the service defines them.
@@ -106,13 +106,13 @@ plugins:
 
 **Two-hop resolution.** `query_data` first fetches the dataset metadata via `get_dataset` to resolve the Feature Service URL, then queries the Feature Service directly. Always call `get_dataset` first and check the `service_url` field is non-empty before calling `query_data`.
 
-**WHERE clause validation.** The `where` parameter is validated by `WhereValidator` before being sent to the Feature Service. Malformed SQL WHERE clauses are rejected before the network call.
+**WHERE clause validation.** The `where` parameter (and `aggregate_data`'s `having`) is validated by `WhereValidator`, and `order_by` by `WhereValidator.validate_order_by`, before anything is sent to the Feature Service. Clauses with forbidden keywords are rejected before the network call.
 
 **Feature Service host restriction.** A dataset record could point `query_data`/`get_schema` at an arbitrary host (SSRF), so the plugin validates the Feature Service URL before querying it. Always trusted: `*.arcgis.com`, the `portal_url` host, and anything in `trusted_service_hosts`. Hub catalogs routinely reference services self-hosted on city GIS domains (`gis.charlottenc.gov`, `maps2.dcgis.dc.gov`, `gis.indy.gov`), so by default (`auto_trust_hub_services: true`) a Hub-referenced URL is also accepted when it is https, on a public DNS name (never an IP literal, single label, or `.internal`/`.local` name), and has an ArcGIS REST path (`/rest/services/.../FeatureServer|MapServer[/layer]`). The bearer `token` is never sent to auto-trusted hosts. A refused URL raises an error beginning `untrusted_service_host: '<host>'` that names the host to add to `trusted_service_hosts`. Set `auto_trust_hub_services: false` to require an explicit allow-list.
 
-**Schema fallback.** `get_schema` reads the layer metadata endpoint (`.../FeatureServer/0?f=json`). Some self-hosted services return HTML or an ArcGIS error envelope there while `/query` works; in that case the plugin derives the field list from a one-row query instead of failing.
+**Schema fallback.** `get_schema` reads the layer metadata endpoint (`.../FeatureServer/<layer>?f=json`). Some self-hosted services return HTML or an ArcGIS error envelope there while `/query` works; in that case the plugin derives the field list from a one-row query instead of failing.
 
-**Auto layer index.** If the dataset's service URL points at a `FeatureServer` or `MapServer` root without a layer index (e.g. `.../FeatureServer`), the plugin automatically appends `/0` to target the default layer.
+**Layer resolution.** If the dataset's service URL points at a `FeatureServer` or `MapServer` root without a layer index (e.g. `.../FeatureServer`), the plugin reads the service description and uses its first layer, then its first table, falling back to `/0` only when the description cannot be read (HUD services whose only layer is id 4 or 13 are reachable this way). Pass `layer` to choose another one. Service and layer descriptions are cached per plugin instance.
 
 **Queryable item types.** `query_data` only works on the following ArcGIS item types:
 

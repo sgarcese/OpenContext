@@ -67,6 +67,7 @@ are all written this way.
 | `HTTP_RETRY` | Decorator adding exponential-backoff retries (3 attempts) for transient HTTP errors |
 | `_raise_http_error(exc, context)` | Translates `httpx.HTTPStatusError` into a user-readable `RuntimeError`, extracting portal error messages when present |
 | `format_records(records, max_display=None, header=None, skip_keys=..., max_chars=RECORDS_BUDGET)` | Renders query results in the standard `Record N:` style. Shows every record unless `max_display` asks for fewer (`... and X more record(s)`) or the output would pass the response size budget, in which case whole records are dropped and a `Showing N of M record(s)` notice is added |
+| `render_rows(records, fmt="text", header=None, skip_keys=..., max_chars=RECORDS_BUDGET, total=None)` | Renders records as `text` (the `format_records` layout), a `json` array (one object per line) or `csv` (header plus one line per record), within the same size budget; returns `(text, shown)` so a caller can compute the next page offset |
 | `build_where_clause(filters)` | Builds a SQL `WHERE` body from a filter dict; escapes string values and **validates field names as plain identifiers** so SQL cannot be smuggled in through keys |
 
 ### Minimal example

@@ -13,7 +13,13 @@ IDs that the connector forwards to the portal. Defenses:
   reject multi-statement, write, and dangerous-function queries and cap query
   length.
 - **Identifier whitelists** restrict field names, metric expressions, `ORDER
-  BY`, and `HAVING` values assembled by `aggregate_data`.
+  BY`, and `HAVING` values assembled by `aggregate_data`. For ArcGIS,
+  `order_by` accepts only field names with an optional `ASC`/`DESC`
+  (`WhereValidator.validate_order_by`); `aggregate_data` statistic fields,
+  output names and `group_by` fields must be plain identifiers that exist in
+  the layer's schema, and `having` goes through the same `WhereValidator` as
+  `where`. `layer` must be an integer id the service lists. All of these are
+  checked before any request is sent.
 - **`build_where_clause`** escapes values and rejects non-identifier field
   names.
 - **Redirect credential scoping** (`_create_http_client(protect_headers=…)`)
@@ -55,8 +61,9 @@ All of this lives in `core/portal_content.py` and is applied centrally by
 | Defense | Where | Effect |
 | --- | --- | --- |
 | **Untrusted-data boundary** | `execute_tool` → `_finalize_result` → `frame_portal_content` | Every successful text result is wrapped: a one-line preamble names the source and states that the content is data, not instructions; the body sits between `<<<BEGIN PORTAL DATA>>>` / `<<<END PORTAL DATA>>>`; the connector's own next-step hint (`ToolHandler(guidance=…)`) is emitted **after** the closing marker so instruction-shaped text never sits inside the data region. |
+| **HTML to text** | `html_to_text` | Catalog descriptions, licences and access notes stored as HTML are converted to plain text (scripts and styles dropped, entities decoded) before normalization, so markup cannot hide text from the injection scan or reach the model as raw tags. |
 | **Normalization** | `clean_text`, `portal_text`, `portal_line` | Strips C0/C1 controls, zero-width and bidi-override code points, Unicode tag characters (“ASCII smuggling”), private-use and unassigned code points; collapses newlines in single-line fields (titles, IDs, tags, field names); truncates with an explicit `…[truncated, N more chars]` marker; defangs any literal boundary marker inside a value. |
-| **Structure forgery prevention** | `format_records`, `indent_continuation` | Record keys are single-line; multi-line values have every continuation line indented, so a value cannot start a fake `Record 2:` header or a fake connector instruction at column 0. |
+| **Structure forgery prevention** | `format_records`, `render_rows`, `indent_continuation` | Record keys are single-line; multi-line values have every continuation line indented, so a value cannot start a fake `Record 2:` header or a fake connector instruction at column 0. JSON output escapes newlines; CSV values are kept on one line. |
 | **Size caps** | `DEFAULT_MAX_TEXT` (4 000 chars/value), `DEFAULT_MAX_LINE` (300), `DEFAULT_MAX_RESPONSE` (60 000/body), `DEFAULT_MAX_ERROR` (500) | Limits context stuffing. |
 | **ID validation** | `safe_id` with a per-plugin `id_pattern` | An ID is only interpolated into a `Portal:` URL or a hint if it matches the provider's ID shape (Socrata 4x4, CKAN slug/UUID, Hub hex, ODS slug); otherwise it renders as `unknown` and no link is built. Links are always built from config + validated ID, never echoed from the portal. |
 | **URL gating** | `BaseOpenDataPlugin.display_portal_url` (ArcGIS `_display_url` wraps it with `trusted_service_hosts`) | Portal-supplied URLs (resource downloads, license/attribution links, service endpoints) are echoed only when their host is the portal/API host or a subdomain of it (or an explicitly trusted host); otherwise only `(external: hostname)` is shown, never the URL itself. |
