@@ -313,6 +313,7 @@ class TestExecuteTool:
             50,
             offset=0,
             order_by=None,
+            layer=None,
         )
 
     @pytest.mark.asyncio
@@ -329,7 +330,7 @@ class TestExecuteTool:
 
         assert result.success is True
         mock_qf.assert_called_once_with(
-            "abc123", "1=1", "*", 100, offset=0, order_by=None
+            "abc123", "1=1", "*", 100, offset=0, order_by=None, layer=None
         )
 
     async def test_execute_tool_query_data_renders_every_returned_record(
