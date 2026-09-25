@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 _ARCGIS_SERVICE_PATH = re.compile(
     r"/rest/services/.+/(FeatureServer|MapServer)(/\d+)?/?$", re.IGNORECASE
 )
+# A FeatureServer/MapServer URL split into its service root and optional
+# layer id (``.../FeatureServer`` + ``4``).
+_SERVICE_ROOT = re.compile(
+    r"^(?P<root>.+/(?:FeatureServer|MapServer))(?:/(?P<layer>\d+))?/?$",
+    re.IGNORECASE,
+)
 # Hostname suffixes that are never valid public service hosts.
 _BLOCKED_HOST_SUFFIXES = (".local", ".localhost", ".internal", ".localdomain")
 
@@ -59,6 +65,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         super().__init__(config)
         # service root URL -> resolved layer URL (see _resolve_layer_url)
         self._layer_url_cache: dict[str, str] = {}
+        # service root URL -> its layers and tables (see _service_layers)
+        self._service_layers_cache: dict[str, list[dict[str, Any]]] = {}
 
     async def initialize(self) -> bool:
         """Initialize ArcGIS Hub plugin and test connection.
@@ -244,6 +252,15 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                             "type": "string",
                             "description": "Hub item ID (same as get_dataset)",
                         },
+                        "layer": {
+                            "type": "integer",
+                            "description": (
+                                "Layer or table id within the Feature Service, as "
+                                "listed by get_dataset. Default: the layer the item "
+                                "points to, or the service's first layer."
+                            ),
+                            "minimum": 0,
+                        },
                     },
                     "required": ["dataset_id"],
                 },
@@ -265,6 +282,15 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                         "dataset_id": {
                             "type": "string",
                             "description": "Hub item ID (same as get_dataset)",
+                        },
+                        "layer": {
+                            "type": "integer",
+                            "description": (
+                                "Layer or table id within the Feature Service, as "
+                                "listed by get_dataset. Default: the layer the item "
+                                "points to, or the service's first layer."
+                            ),
+                            "minimum": 0,
                         },
                         "where": {
                             "type": "string",
@@ -336,7 +362,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                 required_args=("dataset_id",),
                 guidance=(
                     "Use the get_schema tool with this dataset's ID to list "
-                    "fields, then query_data to query features."
+                    "fields, then query_data to query features. Pass layer to "
+                    "reach a layer or table other than the default."
                 ),
             ),
             "get_aggregations": ToolHandler(
@@ -368,6 +395,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
     async def _tool_get_dataset(self, arguments: dict[str, Any]) -> ToolResult:
         dataset = await self.get_dataset(arguments["dataset_id"])
+        dataset["layers"] = await self._dataset_layers(dataset)
         return ToolResult(
             content=[{"type": "text", "text": self._format_dataset(dataset)}],
             success=True,
@@ -385,7 +413,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         )
 
     async def _tool_get_schema(self, arguments: dict[str, Any]) -> ToolResult:
-        schema = await self.get_schema(arguments["dataset_id"])
+        schema = await self.get_schema(
+            arguments["dataset_id"], layer=arguments.get("layer")
+        )
         return ToolResult(
             content=[{"type": "text", "text": self._format_schema(schema)}],
             success=True,
@@ -404,7 +434,13 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                 f"format must be one of {', '.join(ROW_FORMATS)} (got {fmt!r})"
             )
         page = await self._query_page(
-            dataset_id, where, out_fields, limit, offset=offset, order_by=order_by
+            dataset_id,
+            where,
+            out_fields,
+            limit,
+            offset=offset,
+            order_by=order_by,
+            layer=arguments.get("layer"),
         )
         return ToolResult(
             content=[
@@ -489,15 +525,19 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         )
         return result
 
-    async def get_schema(self, dataset_id: str) -> list[dict[str, Any]]:
+    async def get_schema(
+        self, dataset_id: str, *, layer: int | None = None
+    ) -> list[dict[str, Any]]:
         """Get field schema for a dataset's Feature Service layer.
 
         Resolves the Feature Service URL via :meth:`get_dataset` (two-hop),
-        then fetches the layer metadata (``{service_url}/0?f=json``) and
+        then fetches the layer metadata (``{layer_url}?f=json``) and
         returns the ``fields`` list (name, type, alias).
 
         Args:
             dataset_id: Hub item ID
+            layer: Layer or table id within the service; ``None`` uses the
+                default layer (see :meth:`_resolve_layer_url`).
 
         Returns:
             List of field definition dictionaries (name, type, alias)
@@ -518,7 +558,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             self.plugin_config.trusted_service_hosts,
             auto_trust=self.plugin_config.auto_trust_hub_services,
         )
-        layer_url = await self._resolve_layer_url(service_url)
+        layer_url = await self._resolve_layer_url(service_url, layer)
 
         # The format must travel as a query parameter: httpx replaces the
         # URL's own query string with ``params``, so ``{url}?f=json`` plus
@@ -672,6 +712,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         offset: int = 0,
         order_by: str | None = None,
         with_count: bool = True,
+        layer: int | None = None,
     ) -> dict[str, Any]:
         """Query one page of records, with the total match count.
 
@@ -691,6 +732,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             order_by: Sort order (validated via
                 :meth:`WhereValidator.validate_order_by`).
             with_count: Whether to look up the total match count.
+            layer: Layer or table id within the service; ``None`` uses the
+                default layer.
 
         Returns:
             ``{"records", "offset", "total", "exceeded"}``, where ``total`` is
@@ -724,7 +767,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             self.plugin_config.trusted_service_hosts,
             auto_trust=self.plugin_config.auto_trust_hub_services,
         )
-        service_url = await self._resolve_layer_url(service_url)
+        service_url = await self._resolve_layer_url(service_url, layer)
         query_url = f"{service_url}/query"
         record_count = min(limit, 1000)
         params: dict[str, Any] = {
@@ -973,47 +1016,158 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             return "path is not an ArcGIS REST FeatureServer/MapServer path"
         return None
 
-    async def _resolve_layer_url(self, service_url: str) -> str:
+    async def _resolve_layer_url(
+        self, service_url: str, layer: int | None = None
+    ) -> str:
         """Return the layer URL to query for a service URL.
 
-        A URL that already names a layer (``.../FeatureServer/4``) is
-        returned as is. For a service root, the service description
-        (``?f=json``) is read and the first layer's id is used, falling back
-        to the first table, then to ``0``. Services whose only layer is not
-        id 0 (HUD's "Low to Moderate Income Population by Tract" is layer 4,
-        "Opportunity Zones" is layer 13) were unreachable when ``/0`` was
-        assumed. Results are cached per service URL.
+        With ``layer``, the service's layers and tables are read and the id
+        must be one of them (any layer index already in ``service_url`` is
+        replaced). Without it, a URL that already names a layer
+        (``.../FeatureServer/4``) is returned as is; for a service root the
+        first layer is used, falling back to the first table, then to ``0``.
+        Services whose only layer is not id 0 (HUD's "Low to Moderate
+        Income Population by Tract" is layer 4, "Opportunity Zones" is
+        layer 13) were unreachable when ``/0`` was assumed. Default
+        resolutions are cached per service URL.
 
         Args:
             service_url: Validated Feature Service or layer URL.
+            layer: Explicit layer or table id, or ``None`` for the default.
 
         Returns:
             A layer URL (``.../FeatureServer/<id>``).
+
+        Raises:
+            ValueError: If ``layer`` is not a non-negative integer, the URL is
+                not a FeatureServer/MapServer URL, or the service does not
+                list that id.
         """
         stripped = service_url.rstrip("/")
-        if not re.search(r"/(FeatureServer|MapServer)$", stripped, re.IGNORECASE):
+        match = _SERVICE_ROOT.match(stripped)
+
+        if layer is not None:
+            if isinstance(layer, bool) or not isinstance(layer, int) or layer < 0:
+                raise ValueError(
+                    f"layer must be a non-negative integer (got {layer!r})"
+                )
+            if not match:
+                raise ValueError(
+                    "layer can only be used with a FeatureServer or MapServer "
+                    "service URL"
+                )
+            root = match.group("root")
+            listed = await self._service_layers(root)
+            # An unreadable layer list is not proof the id is wrong; let the
+            # service answer for it.
+            if listed and layer not in {entry["id"] for entry in listed}:
+                raise ValueError(
+                    f"layer {layer} is not in this service. Available: "
+                    + "; ".join(self._describe_layer(entry) for entry in listed)
+                )
+            return f"{root}/{layer}"
+
+        if not match or match.group("layer") is not None:
             return stripped
 
         cached = self._layer_url_cache.get(stripped)
         if cached is not None:
             return cached
 
-        layer_id = 0
-        try:
-            response = await self._call_feature_service(stripped, {"f": "json"})
-            data = response.json() or {}
-            candidates = list(data.get("layers") or []) + list(data.get("tables") or [])
-            first = next((c for c in candidates if isinstance(c.get("id"), int)), None)
-            if first is not None:
-                layer_id = int(first["id"])
-        except Exception as exc:  # noqa: BLE001 - metadata unreachable: keep default
-            logger.warning(
-                "Could not read layer list for %s (%s); assuming layer 0", stripped, exc
-            )
-
+        listed = await self._service_layers(stripped)
+        # Layers are listed before tables, so the first entry is the first
+        # layer, or the first table when there are no layers.
+        layer_id = listed[0]["id"] if listed else 0
         resolved = f"{stripped}/{layer_id}"
         self._layer_url_cache[stripped] = resolved
         return resolved
+
+    async def _service_layers(self, service_root: str) -> list[dict[str, Any]]:
+        """List a service's layers, then tables, from ``{root}?f=json``.
+
+        Each entry is ``{"id", "name", "kind", "geometry"}`` where ``kind`` is
+        ``"layer"`` or ``"table"``. Returns ``[]`` (and logs a warning) when
+        the service description cannot be read; successful reads are cached.
+
+        Args:
+            service_root: Validated ``.../FeatureServer`` or ``.../MapServer`` URL.
+        """
+        cached = self._service_layers_cache.get(service_root)
+        if cached is not None:
+            return cached
+        try:
+            response = await self._call_feature_service(service_root, {"f": "json"})
+            data = response.json() or {}
+        except Exception as exc:  # noqa: BLE001 - metadata unreachable: no list
+            logger.warning(
+                "Could not read layer list for %s (%s); assuming layer 0",
+                service_root,
+                exc,
+            )
+            return []
+
+        entries: list[dict[str, Any]] = []
+        for kind, key in (("layer", "layers"), ("table", "tables")):
+            for item in data.get(key) or []:
+                if not isinstance(item, dict):
+                    continue
+                layer_id = item.get("id")
+                if isinstance(layer_id, bool) or not isinstance(layer_id, int):
+                    continue
+                entries.append(
+                    {
+                        "id": layer_id,
+                        "name": item.get("name", ""),
+                        "kind": kind,
+                        "geometry": item.get("geometryType", ""),
+                    }
+                )
+        self._service_layers_cache[service_root] = entries
+        return entries
+
+    async def _dataset_layers(self, dataset: dict[str, Any]) -> list[dict[str, Any]]:
+        """Layers and tables of a dataset's service, for ``get_dataset``.
+
+        Marks the entry that queries use by default with ``"default": True``.
+        Returns ``[]`` when the dataset has no service URL, the host is not
+        trusted, or the service description cannot be read; ``get_dataset``
+        still succeeds.
+        """
+        service_url = dataset.get("service_url")
+        if not service_url:
+            return []
+        try:
+            service_url = self._validate_feature_url(
+                service_url,
+                self.plugin_config.portal_url,
+                self.plugin_config.trusted_service_hosts,
+                auto_trust=self.plugin_config.auto_trust_hub_services,
+            )
+        except ValueError:
+            return []
+        match = _SERVICE_ROOT.match(service_url.rstrip("/"))
+        if not match:
+            return []
+        listed = await self._service_layers(match.group("root"))
+        if not listed:
+            return []
+        default_id = (
+            int(match.group("layer"))
+            if match.group("layer") is not None
+            else listed[0]["id"]
+        )
+        return [{**entry, "default": entry["id"] == default_id} for entry in listed]
+
+    def _describe_layer(self, entry: dict[str, Any]) -> str:
+        """Render one layer/table entry as ``1: SAFMR_table (table)``."""
+        name = self.portal_line(entry.get("name"), default="unnamed")
+        if entry.get("kind") == "table":
+            kind = "table"
+        else:
+            geometry = str(entry.get("geometry") or "")
+            shape = geometry.removeprefix("esriGeometry").lower()
+            kind = f"{self.portal_line(shape)} layer" if shape else "layer"
+        return f"{entry.get('id')}: {name} ({kind})"
 
     @staticmethod
     def _ensure_layer_url(service_url: str) -> str:
@@ -1164,6 +1318,14 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             add("Additional Resources", line(additional, max_len=1000))
         add("URL", self._display_url(dataset.get("url")))
         add("Service URL", self._display_url(dataset.get("service_url")))
+        layers = dataset.get("layers") or []
+        if layers:
+            lines.append(
+                "Layers and tables (pass the id as layer to get_schema or query_data):"
+            )
+            for entry in layers:
+                marker = " [default]" if entry.get("default") else ""
+                lines.append(f"  {self._describe_layer(entry)}{marker}")
         return "\n".join(lines)
 
     def _display_url(self, url: Any) -> str:
