@@ -1151,12 +1151,14 @@ class TestCodeReviewFixes:
         result = await plugin.execute_tool("search_datasets", {"q": "crime"})
         assert result.success is False
 
-    def test_format_query_results_caps_display(self):
+    def test_format_query_results_shows_every_record(self):
+        """Issue #28: 39 rows under limit 50 must all render, not the first 10."""
         from plugins.arcgis.plugin import ArcGISPlugin
 
         plugin = ArcGISPlugin(self._config())
-        records = [{"a": i} for i in range(50)]
-        text = plugin._format_query_results(records, limit=1000)
-        assert "Record 10:" in text
-        assert "Record 11:" not in text
-        assert "... and 40 more record(s)" in text
+        records = [{"PROJECT": f"P{i}", "LI_UNITS": i} for i in range(39)]
+        text = plugin._format_query_results(records, limit=50)
+        assert "Returned 39 record(s) (limit: 50):" in text
+        assert "Record 39:" in text
+        assert "PROJECT: P38" in text
+        assert "more record" not in text

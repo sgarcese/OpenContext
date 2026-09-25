@@ -676,7 +676,7 @@ Use get_schema first for column names.""",
             header_lines.append(f"Fields: {', '.join(field_names)}")
 
         header = "\n".join(header_lines)
-        return self.format_records(records, max_display=10, header=header)
+        return self.format_records(records, header=header)
 
     def _format_categories(self, categories: List[Any]) -> str:
         """Format categories for user display."""

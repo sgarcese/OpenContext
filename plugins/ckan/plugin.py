@@ -746,8 +746,7 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
 
         return self.format_records(
             records,
-            max_display=5,
-            header=f"Found {len(records)} record(s) (showing up to {limit}):",
+            header=f"Found {len(records)} record(s) (limit: {limit}):",
         )
 
     def _format_schema(self, fields: List[Dict[str, Any]]) -> str:
@@ -790,4 +789,4 @@ Supports: count(*), sum(), avg(), min(), max(), stddev()
             header_lines.append(f"Fields: {', '.join(field_names)}")
 
         header = "\n".join(header_lines)
-        return self.format_records(records, max_display=10, header=header)
+        return self.format_records(records, header=header)

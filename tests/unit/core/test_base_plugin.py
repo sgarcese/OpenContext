@@ -7,7 +7,7 @@ import httpx
 import pytest
 from pydantic import field_validator
 
-from core.base_plugin import BaseOpenDataPlugin, ToolHandler
+from core.base_plugin import RECORDS_BUDGET, BaseOpenDataPlugin, ToolHandler
 from core.config_base import BasePluginConfig
 from core.interfaces import ToolResult
 
@@ -292,6 +292,33 @@ class TestFormatRecords:
         records = [{"i": i} for i in range(10)]
         out = plugin.format_records(records, max_display=10)
         assert "more record" not in out
+
+    def test_renders_all_records_by_default(self, plugin):
+        records = [{"i": i} for i in range(39)]
+        out = plugin.format_records(records)
+        assert "Record 39:" in out
+        assert "more record" not in out
+
+    def test_budget_drops_whole_records_with_notice(self, plugin):
+        records = [{"v": "x" * 50} for _ in range(10)]
+        out = plugin.format_records(records, header="Header", max_chars=250)
+        assert out.startswith("Header")
+        assert "Record 3:" in out
+        assert "Record 4:" not in out
+        assert "Showing 3 of 10 record(s)" in out
+        assert out.count("v: " + "x" * 50) == 3
+
+    def test_budget_always_renders_first_record(self, plugin):
+        out = plugin.format_records([{"v": "x" * 500}, {"v": "y"}], max_chars=10)
+        assert "Record 1:" in out
+        assert "x" * 500 in out
+        assert "Showing 1 of 2 record(s)" in out
+
+    def test_default_budget_bounds_the_output(self, plugin):
+        records = [{"v": "x" * 3_000} for _ in range(100)]
+        out = plugin.format_records(records, header="Found 100 record(s)")
+        assert len(out) <= RECORDS_BUDGET + 200
+        assert "record(s); the rest did not fit" in out
 
     def test_custom_skip_keys(self, plugin):
         records = [{"secret": 1, "name": "A"}]
