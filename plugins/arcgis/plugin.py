@@ -5,6 +5,7 @@ via the OGC API - Records (Hub Search API) and ArcGIS Feature Services.
 """
 
 import ipaddress
+import json
 import logging
 import re
 from typing import Any
@@ -31,6 +32,13 @@ _SERVICE_ROOT = re.compile(
     r"^(?P<root>.+/(?:FeatureServer|MapServer))(?:/(?P<layer>\d+))?/?$",
     re.IGNORECASE,
 )
+# Statistic types accepted by aggregate_data (ArcGIS ``statisticType``).
+STATISTIC_TYPES = ("count", "sum", "avg", "min", "max", "stddev")
+# A plain field name or output alias.
+_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+# Upper bounds on aggregate_data inputs.
+_MAX_STATISTICS = 20
+_MAX_GROUP_BY = 10
 # Hostname suffixes that are never valid public service hosts.
 _BLOCKED_HOST_SUFFIXES = (".local", ".localhost", ".internal", ".localdomain")
 
@@ -340,6 +348,98 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                     "required": ["dataset_id"],
                 },
             ),
+            ToolDefinition(
+                name="aggregate_data",
+                description=(
+                    "Compute statistics (count, sum, avg, min, max, stddev) on an "
+                    "ArcGIS Feature Service layer, optionally grouped by fields, in "
+                    "one server-side call. Use it for totals and counts by area "
+                    "instead of paging through query_data. Null values are left out "
+                    "of every statistic, so a sum over a field with suppressed "
+                    "values is a lower bound. Use get_schema first for field names."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "dataset_id": {
+                            "type": "string",
+                            "description": "Hub item ID (same as get_dataset)",
+                        },
+                        "layer": {
+                            "type": "integer",
+                            "description": (
+                                "Layer or table id within the Feature Service, as "
+                                "listed by get_dataset. Default: the layer the item "
+                                "points to, or the service's first layer."
+                            ),
+                            "minimum": 0,
+                        },
+                        "statistics": {
+                            "type": "array",
+                            "description": (
+                                "Statistics to compute, e.g. "
+                                '[{"type": "sum", "field": "HCV_PUBLIC", "as": '
+                                '"vouchers"}, {"type": "count", "field": "GEOID"}]. '
+                                "count may omit field to count records."
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": {
+                                        "type": "string",
+                                        "enum": list(STATISTIC_TYPES),
+                                    },
+                                    "field": {"type": "string"},
+                                    "as": {"type": "string"},
+                                },
+                                "required": ["type"],
+                            },
+                            "minItems": 1,
+                            "maxItems": _MAX_STATISTICS,
+                        },
+                        "group_by": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Fields to group by (one row per group)",
+                            "maxItems": _MAX_GROUP_BY,
+                        },
+                        "where": {
+                            "type": "string",
+                            "description": "SQL WHERE clause applied before grouping",
+                            "default": "1=1",
+                        },
+                        "having": {
+                            "type": "string",
+                            "description": (
+                                "Filter on the computed statistics, e.g. "
+                                '"SUM(HCV_PUBLIC) > 100" (only on services that '
+                                "support it)"
+                            ),
+                        },
+                        "order_by": {
+                            "type": "string",
+                            "description": (
+                                "Sort by group fields or statistic names, each "
+                                'optionally ASC or DESC (e.g. "vouchers DESC")'
+                            ),
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Maximum number of groups (default: 1000)",
+                            "default": 1000,
+                            "minimum": 1,
+                            "maximum": 5000,
+                        },
+                        "format": {
+                            "type": "string",
+                            "enum": list(ROW_FORMATS),
+                            "description": "Output format: text, json or csv",
+                            "default": "text",
+                        },
+                    },
+                    "required": ["dataset_id", "statistics"],
+                },
+            ),
         ]
 
     def tool_handlers(self) -> dict[str, ToolHandler]:
@@ -374,6 +474,15 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             ),
             "query_data": ToolHandler(
                 handler=self._tool_query_data, required_args=("dataset_id",)
+            ),
+            "aggregate_data": ToolHandler(
+                handler=self._tool_aggregate_data,
+                required_args=("dataset_id", "statistics"),
+                guidance=(
+                    "Statistics ignore null values: where a source suppresses "
+                    "small counts as null, a sum is a lower bound and a count of "
+                    "a field counts only non-null values."
+                ),
             ),
         }
 
@@ -449,6 +558,27 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                     "text": self._format_query_results(page, limit, fmt=fmt),
                 }
             ],
+            success=True,
+        )
+
+    async def _tool_aggregate_data(self, arguments: dict[str, Any]) -> ToolResult:
+        fmt = arguments.get("format") or "text"
+        if fmt not in ROW_FORMATS:
+            raise ValueError(
+                f"format must be one of {', '.join(ROW_FORMATS)} (got {fmt!r})"
+            )
+        result = await self.aggregate_features(
+            arguments["dataset_id"],
+            arguments["statistics"],
+            group_by=arguments.get("group_by"),
+            where=arguments.get("where", "1=1"),
+            having=arguments.get("having"),
+            order_by=arguments.get("order_by"),
+            limit=arguments.get("limit", 1000),
+            layer=arguments.get("layer"),
+        )
+        return ToolResult(
+            content=[{"type": "text", "text": self._format_aggregate(result, fmt=fmt)}],
             success=True,
         )
 
@@ -545,39 +675,8 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         Raises:
             ValueError: If the dataset has no queryable service URL.
         """
-        dataset = await self.get_dataset(dataset_id)
-        service_url = dataset.get("service_url")
-        if not service_url:
-            raise ValueError(
-                f"Dataset {dataset_id} does not have a queryable Feature Service URL"
-            )
-
-        service_url = self._validate_feature_url(
-            service_url,
-            self.plugin_config.portal_url,
-            self.plugin_config.trusted_service_hosts,
-            auto_trust=self.plugin_config.auto_trust_hub_services,
-        )
-        layer_url = await self._resolve_layer_url(service_url, layer)
-
-        # The format must travel as a query parameter: httpx replaces the
-        # URL's own query string with ``params``, so ``{url}?f=json`` plus
-        # ``params={}`` sent a bare request and ArcGIS answered with an HTML
-        # page ("Expecting value: line 1 column 1" on every dataset).
-        response = await self._call_feature_service(layer_url, {"f": "json"})
-
-        fields = self._fields_from_layer_metadata(response)
-        if fields is None:
-            # Some self-hosted services return HTML or a malformed body on
-            # the layer metadata endpoint while the query endpoint works
-            # (seen on Columbus and Indianapolis). Derive the schema from a
-            # one-row query instead of failing.
-            logger.warning(
-                "Layer metadata at %s was not usable; deriving schema from a "
-                "1-row query",
-                layer_url,
-            )
-            fields = await self._schema_from_query(layer_url)
+        layer_url = await self._layer_url_for(dataset_id, layer)
+        fields, _ = await self._layer_fields(layer_url)
         return [
             {
                 "name": f.get("name", ""),
@@ -586,6 +685,71 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             }
             for f in fields
         ]
+
+    async def _layer_url_for(
+        self, dataset_id: str, layer: int | None, *, queryable_only: bool = False
+    ) -> str:
+        """Resolve a Hub item to a trusted layer URL (two-hop).
+
+        Args:
+            dataset_id: Hub item ID.
+            layer: Layer or table id, or ``None`` for the default layer.
+            queryable_only: Refuse item types outside :attr:`QUERYABLE_TYPES`.
+
+        Returns:
+            The validated layer URL (``.../FeatureServer/<id>``).
+
+        Raises:
+            ValueError: If the item has no service URL, is not a queryable
+                type, its host is not trusted, or ``layer`` is invalid.
+        """
+        dataset = await self.get_dataset(dataset_id)
+        service_url = dataset.get("service_url")
+        if not service_url:
+            raise ValueError(
+                f"Dataset {dataset_id} does not have a queryable Feature Service URL"
+            )
+        ds_type = dataset.get("type", "")
+        if queryable_only and ds_type and ds_type not in self.QUERYABLE_TYPES:
+            raise ValueError(
+                f"Dataset type '{ds_type}' is not queryable. "
+                f"query_data only supports: {', '.join(sorted(self.QUERYABLE_TYPES))}."
+            )
+        service_url = self._validate_feature_url(
+            service_url,
+            self.plugin_config.portal_url,
+            self.plugin_config.trusted_service_hosts,
+            auto_trust=self.plugin_config.auto_trust_hub_services,
+        )
+        return await self._resolve_layer_url(service_url, layer)
+
+    async def _layer_fields(
+        self, layer_url: str
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+        """Return a layer's ``fields`` and its raw metadata.
+
+        Reads ``{layer_url}?f=json``; when that body is unusable, the fields
+        come from a one-row query and the metadata is ``{}``.
+        """
+        # The format must travel as a query parameter: httpx replaces the
+        # URL's own query string with ``params``, so ``{url}?f=json`` plus
+        # ``params={}`` sent a bare request and ArcGIS answered with an HTML
+        # page ("Expecting value: line 1 column 1" on every dataset).
+        response = await self._call_feature_service(layer_url, {"f": "json"})
+
+        fields = self._fields_from_layer_metadata(response)
+        if fields is not None:
+            metadata = response.json()
+            return fields, metadata if isinstance(metadata, dict) else {}
+        # Some self-hosted services return HTML or a malformed body on the
+        # layer metadata endpoint while the query endpoint works (seen on
+        # Columbus and Indianapolis). Derive the schema from a one-row query
+        # instead of failing.
+        logger.warning(
+            "Layer metadata at %s was not usable; deriving schema from a 1-row query",
+            layer_url,
+        )
+        return await self._schema_from_query(layer_url), {}
 
     @staticmethod
     def _fields_from_layer_metadata(response: httpx.Response) -> list | None:
@@ -745,30 +909,10 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             raise ValueError(f"offset must be a non-negative integer (got {offset})")
         sort = WhereValidator.validate_order_by(order_by)
-
-        dataset = await self.get_dataset(dataset_id)
-        service_url = dataset.get("service_url")
-        ds_type = dataset.get("type", "")
-        if not service_url:
-            raise ValueError(
-                f"Dataset {dataset_id} does not have a queryable Feature Service URL"
-            )
-
-        if ds_type and ds_type not in self.QUERYABLE_TYPES:
-            raise ValueError(
-                f"Dataset type '{ds_type}' is not queryable. "
-                f"query_data only supports: {', '.join(sorted(self.QUERYABLE_TYPES))}."
-            )
-
         where_clause = WhereValidator.validate(where)
-        service_url = self._validate_feature_url(
-            service_url,
-            self.plugin_config.portal_url,
-            self.plugin_config.trusted_service_hosts,
-            auto_trust=self.plugin_config.auto_trust_hub_services,
-        )
-        service_url = await self._resolve_layer_url(service_url, layer)
-        query_url = f"{service_url}/query"
+
+        layer_url = await self._layer_url_for(dataset_id, layer, queryable_only=True)
+        query_url = f"{layer_url}/query"
         record_count = min(limit, 1000)
         params: dict[str, Any] = {
             "where": where_clause,
@@ -847,6 +991,188 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         if isinstance(count, bool) or not isinstance(count, int):
             return None
         return count
+
+    async def aggregate_features(
+        self,
+        dataset_id: str,
+        statistics: list[dict[str, Any]],
+        *,
+        group_by: list[str] | None = None,
+        where: str = "1=1",
+        having: str | None = None,
+        order_by: str | None = None,
+        limit: int = 1000,
+        layer: int | None = None,
+    ) -> dict[str, Any]:
+        """Run a server-side statistics query (``outStatistics``).
+
+        Every field named in ``statistics`` and ``group_by`` must exist in the
+        layer's schema (matched case-insensitively and sent with the schema's
+        spelling). ``where`` and ``having`` go through
+        :class:`WhereValidator`, ``order_by`` through
+        :meth:`WhereValidator.validate_order_by`. A ``count`` without a field
+        counts records using the layer's object-id field.
+
+        Args:
+            dataset_id: Hub item ID.
+            statistics: ``[{"type", "field", "as"}]``; ``type`` is one of
+                :data:`STATISTIC_TYPES`, ``as`` names the output column
+                (default ``<type>_<field>``).
+            group_by: Fields to group by.
+            where: WHERE clause applied before grouping.
+            having: Filter on the computed statistics.
+            order_by: Sort order over group fields or output names.
+            limit: Maximum number of groups returned.
+            layer: Layer or table id, or ``None`` for the default layer.
+
+        Returns:
+            ``{"rows", "total_groups", "layer_url", "exceeded"}``.
+
+        Raises:
+            ValueError: On invalid arguments, unknown fields, or a layer that
+                does not support statistics.
+            RuntimeError: If the service reports an error.
+        """
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError(f"limit must be at least 1 (got {limit})")
+        if not isinstance(statistics, list) or not statistics:
+            raise ValueError("statistics must be a non-empty list")
+        if len(statistics) > _MAX_STATISTICS:
+            raise ValueError(f"statistics accepts at most {_MAX_STATISTICS} entries")
+        group_by = group_by or []
+        if not isinstance(group_by, list) or not all(
+            isinstance(g, str) for g in group_by
+        ):
+            raise ValueError("group_by must be a list of field names")
+        if len(group_by) > _MAX_GROUP_BY:
+            raise ValueError(f"group_by accepts at most {_MAX_GROUP_BY} fields")
+        for name in group_by:
+            self._check_field_name(name, "group_by field")
+        requested = [self._parse_statistic(stat) for stat in statistics]
+        where_clause = WhereValidator.validate(where)
+        having_clause = (
+            WhereValidator.validate(having)
+            if isinstance(having, str) and having.strip()
+            else None
+        )
+        if having is not None and not isinstance(having, str):
+            raise ValueError("having must be a string")
+        sort = WhereValidator.validate_order_by(order_by)
+
+        layer_url = await self._layer_url_for(dataset_id, layer, queryable_only=True)
+        fields, metadata = await self._layer_fields(layer_url)
+        capabilities = metadata.get("advancedQueryCapabilities") or {}
+        if capabilities.get("supportsStatistics") is False:
+            raise ValueError(
+                "This layer does not support server-side statistics; use "
+                "query_data and aggregate the rows instead."
+            )
+
+        by_name = {
+            str(f.get("name", "")).lower(): f for f in fields if isinstance(f, dict)
+        }
+        object_id = next(
+            (f.get("name") for f in fields if f.get("type") == "esriFieldTypeOID"),
+            None,
+        )
+
+        def schema_name(name: str, role: str) -> str:
+            field = by_name.get(name.lower())
+            if field is None:
+                raise ValueError(
+                    f"Unknown {role} {name!r}; use get_schema to list this "
+                    "layer's fields"
+                )
+            return str(field["name"])
+
+        groups = [schema_name(g, "group_by field") for g in group_by]
+        out_statistics = []
+        out_names: set[str] = {g.lower() for g in groups}
+        for stat_type, field, alias in requested:
+            if field is None:
+                if stat_type != "count":
+                    raise ValueError(f"{stat_type} needs a field")
+                if not object_id:
+                    raise ValueError(
+                        "count without a field needs an object-id field; name "
+                        "a field to count"
+                    )
+                field = object_id
+            else:
+                field = schema_name(field, "statistics field")
+            alias = alias or f"{stat_type}_{field}"
+            if alias.lower() in out_names:
+                raise ValueError(
+                    f"Output name {alias!r} is used twice; give each statistic "
+                    "a distinct 'as'"
+                )
+            out_names.add(alias.lower())
+            out_statistics.append(
+                {
+                    "statisticType": stat_type,
+                    "onStatisticField": field,
+                    "outStatisticFieldName": alias,
+                }
+            )
+
+        params: dict[str, Any] = {
+            "where": where_clause,
+            "outStatistics": json.dumps(out_statistics),
+            "returnGeometry": "false",
+            "f": "json",
+        }
+        if groups:
+            params["groupByFieldsForStatistics"] = ",".join(groups)
+        if having_clause:
+            params["havingClause"] = having_clause
+        if sort:
+            params["orderByFields"] = sort
+
+        data = self._query_json(
+            await self._call_feature_service(f"{layer_url}/query", params)
+        )
+        rows = [f.get("attributes", {}) for f in data.get("features") or []]
+        return {
+            "rows": rows[:limit],
+            "total_groups": len(rows),
+            "layer_url": layer_url,
+            "exceeded": bool(data.get("exceededTransferLimit")),
+        }
+
+    @staticmethod
+    def _check_field_name(name: Any, role: str) -> str:
+        """Require a plain field name or output alias."""
+        if not isinstance(name, str) or not _FIELD_NAME.match(name):
+            raise ValueError(
+                f"Invalid {role} {str(name)[:80]!r}: use a plain field name "
+                "(letters, digits, underscores)"
+            )
+        return name
+
+    def _parse_statistic(self, stat: Any) -> tuple[str, str | None, str | None]:
+        """Validate one ``statistics`` entry; return ``(type, field, as)``."""
+        if not isinstance(stat, dict):
+            raise ValueError(
+                'Each statistic must be an object like {"type": "sum", '
+                '"field": "UNITS"}'
+            )
+        stat_type = str(stat.get("type", "")).lower()
+        if stat_type not in STATISTIC_TYPES:
+            raise ValueError(
+                f"Unknown statistic type {str(stat.get('type'))[:40]!r}; use one "
+                f"of {', '.join(STATISTIC_TYPES)}"
+            )
+        field = stat.get("field")
+        if field in (None, "", "*"):
+            field = None
+        else:
+            self._check_field_name(field, "statistics field")
+        alias = stat.get("as")
+        if alias in (None, ""):
+            alias = None
+        else:
+            self._check_field_name(alias, "statistic name")
+        return stat_type, field, alias
 
     # ── Aggregations (standalone helper, not a DataPlugin method) ───────
 
@@ -1396,6 +1722,25 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             text += (
                 f"\n\nMore records match. Next page: offset={next_offset} "
                 "with the same where, out_fields and order_by."
+            )
+        return text
+
+    def _format_aggregate(self, result: dict[str, Any], *, fmt: str = "text") -> str:
+        """Format an :meth:`aggregate_features` result."""
+        rows = result.get("rows") or []
+        if not rows:
+            return "No groups matched."
+        total = result.get("total_groups", len(rows))
+        header = (
+            f"Aggregated {total} group(s):"
+            if total == len(rows)
+            else f"Aggregated {total} group(s); showing the first {len(rows)} (limit):"
+        )
+        text, _ = self.render_rows(rows, fmt, header=header, skip_keys=frozenset())
+        if result.get("exceeded"):
+            text += (
+                "\n\nThe service hit its transfer limit, so some groups are "
+                "missing. Narrow where or group by fewer fields."
             )
         return text
 
