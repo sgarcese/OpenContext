@@ -41,9 +41,10 @@ IDs that the connector forwards to the portal. Defenses:
 - **Metadata XML parsing** (`plugins/arcgis/metadata_xml.py`). ArcGIS
   `get_schema` reads an item's formal metadata document from a fixed
   `www.arcgis.com` URL built from a validated 32-hex item id. Documents over
-  2 MB or carrying a DTD (`<!DOCTYPE`/`<!ENTITY`) are refused before parsing,
-  so neither external entities (XXE) nor entity expansion ("billion laughs")
-  reach the stdlib parser. Definitions it yields are portal content and go
+  2 MB are refused, and an expat pre-pass refuses any document that declares
+  a DTD (doctype or entity declaration), whatever its encoding, before
+  ElementTree builds a tree. Neither external entities (XXE) nor entity
+  expansion ("billion laughs") reach the parser that reads the fields. Definitions it yields are portal content and go
   through the same cleaning and length caps as other schema text.
 
 ## Inbound: portal → LLM (prompt injection)

@@ -7,16 +7,19 @@ ArcGIS, FGDC or ISO profile. Its entity-and-attribute section
 units and sometimes an enumerated or range domain: more than a field alias
 usually says.
 
-Parsing is defensive: documents over :data:`MAX_METADATA_BYTES` or with a
-DTD (``<!DOCTYPE``/``<!ENTITY``) are refused before parsing. Both XXE and
-entity-expansion ("billion laughs") attacks need a DTD, so the stdlib parser
-never sees one; ``defusedxml`` is not a runtime dependency of the Lambda
-package. Any parse failure yields no definitions.
+Parsing is defensive: documents over :data:`MAX_METADATA_BYTES` are refused,
+and an expat pre-pass refuses any document with a DTD (a doctype or entity
+declaration) before ElementTree builds a tree. Expat detects the encoding
+itself, so a UTF-16 document cannot hide its ``<!DOCTYPE`` from the check.
+Both XXE and entity-expansion ("billion laughs") attacks need a DTD;
+``defusedxml`` is not a runtime dependency of the Lambda package. Any parse
+failure yields no definitions.
 """
 
 import logging
 import re
 import xml.etree.ElementTree as ET
+from xml.parsers import expat
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -28,7 +31,35 @@ _MAX_ENUM_VALUES = 200
 
 # A Hub dataset id is the 32-hex item id, optionally with a ``_<layer>`` suffix.
 _ITEM_ID = re.compile(r"^([0-9a-fA-F]{32})(?:_\d+)?$")
-_DTD = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)", re.IGNORECASE)
+
+
+class _DTDRefused(Exception):
+    """Raised by the expat pre-pass when a document declares a DTD."""
+
+
+def _refuse_dtd(*_args: Any) -> None:
+    raise _DTDRefused
+
+
+def _has_dtd(document: bytes) -> bool:
+    """Return ``True`` when the document declares a DTD or cannot be read.
+
+    Runs expat with handlers that stop at the first doctype or entity
+    declaration, before any entity is expanded or resolved. Unreadable
+    documents count as unsafe.
+    """
+    parser = expat.ParserCreate()
+    parser.StartDoctypeDeclHandler = _refuse_dtd
+    parser.EntityDeclHandler = _refuse_dtd
+    parser.UnparsedEntityDeclHandler = _refuse_dtd
+    parser.ExternalEntityRefHandler = _refuse_dtd
+    try:
+        parser.Parse(document, True)
+    except _DTDRefused:
+        return True
+    except expat.ExpatError:
+        return True
+    return False
 
 
 def item_id_from(dataset_id: Any) -> str | None:
@@ -94,8 +125,8 @@ def parse_entities(document: bytes) -> list[tuple[str, dict[str, dict[str, Any]]
     """
     if not document or len(document) > MAX_METADATA_BYTES:
         return []
-    if _DTD.search(document):
-        logger.warning("Refusing metadata document with a DTD")
+    if _has_dtd(document):
+        logger.warning("Refusing metadata document with a DTD or invalid XML")
         return []
     try:
         root = ET.fromstring(document)
