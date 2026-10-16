@@ -30,7 +30,19 @@ class WhereValidator(BaseQueryValidator):
     Service ``where`` parameter is a WHERE-clause fragment (not a full
     SELECT statement), so the prefix and dangerous-pattern checks do not
     apply. Only the forbidden-keyword scan is reused.
+
+    A WHERE/HAVING fragment never needs a subquery or a set operator on
+    services with standardized queries (the ArcGIS Online default), so
+    ``SELECT``, ``UNION``, ``INTERSECT`` and ``EXCEPT`` are refused as well.
     """
+
+    FORBIDDEN_KEYWORDS: list[str] = [
+        *BaseQueryValidator.FORBIDDEN_KEYWORDS,
+        "SELECT",
+        "UNION",
+        "INTERSECT",
+        "EXCEPT",
+    ]
 
     @classmethod
     def validate(cls, where: str) -> str:
