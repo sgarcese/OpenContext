@@ -236,7 +236,7 @@ See [CLI Guide](CLI.md) for full flag documentation.
 
 - [CLI Reference](CLI.md) — All commands and flags in detail
 - [Architecture](ARCHITECTURE.md) — System design, built-in plugins, custom plugins
-- [Built-in Plugins](BUILT_IN_PLUGINS.md) — CKAN, ArcGIS Hub, and Socrata tool reference
+- [Built-in Plugins](BUILT_IN_PLUGINS.md) — CKAN, ArcGIS Hub, Socrata, and Opendatasoft tool reference
 - [Deployment](DEPLOYMENT.md) — AWS & GCP (`--cloud`), monitoring, cost
 - [Testing](TESTING.md) — Local testing (Terminal, Claude, MCP Inspector)
 

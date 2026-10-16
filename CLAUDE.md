@@ -1,6 +1,6 @@
 # OpenContext — Claude Code Guide
 
-Extensible MCP (Model Context Protocol) framework for civic data platforms. Connects AI assistants to public open data sources (CKAN, ArcGIS, Socrata) via a plugin system, deployed as AWS Lambda.
+Extensible MCP (Model Context Protocol) framework for civic data platforms. Connects AI assistants to public open data sources (CKAN, ArcGIS Hub, Socrata, Opendatasoft) via a plugin system, deployed as AWS Lambda or GCP Cloud Functions.
 
 ## Key Architectural Rule: One Fork = One MCP Server
 
@@ -24,7 +24,7 @@ opencontext serve
 opencontext test --url http://localhost:8000/mcp
 
 # Tests
-pytest tests/ -n auto --cov=core --cov=plugins --cov-fail-under=80
+pytest tests/ -n auto --cov=core --cov=plugins --cov=server --cov-fail-under=80
 
 # Lint + format (matches CI)
 ruff check core/ plugins/ server/ tests/ --fix --unsafe-fixes
@@ -113,7 +113,7 @@ Replicate CI locally:
 ```bash
 uv run ruff check core/ plugins/ server/ tests/
 uv run pip-audit -r requirements.txt
-uv run pytest tests/ -n auto --cov=core --cov=plugins --cov-fail-under=80
+uv run pytest tests/ -n auto --cov=core --cov=plugins --cov=server --cov-fail-under=80
 ```
 
 ## Gotchas

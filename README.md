@@ -118,7 +118,7 @@ uv run pre-commit install     # Ruff, yamllint, gofmt on each commit
 # What CI runs
 uv run ruff check core/ plugins/ server/ tests/
 uv run ruff format --check core/ plugins/ server/ tests/
-uv run pytest tests/ -n auto --cov=core --cov=plugins --cov-fail-under=80
+uv run pytest tests/ -n auto --cov=core --cov=plugins --cov=server --cov-fail-under=80
 ```
 
 CI also runs `pip-audit`, Terraform fmt/validate, tflint and tfsec. New code needs tests: the coverage gate is 80%. To add a data source, start from [Custom Plugins](docs/CUSTOM_PLUGINS.md).
