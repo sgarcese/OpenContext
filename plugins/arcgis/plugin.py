@@ -46,6 +46,10 @@ DESCRIPTION_MAX = 12_000
 _MAX_DOMAIN_VALUES = 30
 # Field definitions shown per field in get_schema (from the item metadata XML).
 _MAX_DEFINITION = 600
+# Seconds allowed for the optional metadata XML fetch in get_schema.
+_METADATA_TIMEOUT = 10.0
+# Items whose parsed metadata (or lasting miss) is kept in memory.
+_MAX_CACHED_METADATA = 256
 # Formal item metadata lives on the ArcGIS Online sharing API, not on the Hub
 # site (a Hub domain answers this path with an HTML page).
 _ITEM_METADATA_URL = (
@@ -743,8 +747,10 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
         Best-effort: a dataset id that is not an ArcGIS item id, a missing
         document, an HTTP error, an oversized or malformed document all give
-        ``{}`` and never fail the schema call. Parsed documents (and misses)
-        are cached per item.
+        ``{}`` and never fail the schema call. Parsed documents and lasting
+        misses (4xx, oversized, unparseable) are cached per item; network
+        errors and 5xx responses are not, so a blip does not hide an item's
+        definitions for the life of a warm Lambda.
 
         Returns:
             ``{lower-cased field name: {"definition", "units", "domain"}}``
@@ -755,26 +761,58 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             return {}
         entities = self._item_metadata_cache.get(item_id)
         if entities is None:
-            entities = []
             try:
-                response = await self.feature_client.get(
-                    _ITEM_METADATA_URL.format(item_id=item_id)
-                )
-                body = response.content
-                if (
-                    response.status_code == 200
-                    and isinstance(body, bytes)
-                    and len(body) <= MAX_METADATA_BYTES
-                ):
-                    entities = parse_entities(body)
+                body, lasting = await self._fetch_item_metadata(item_id)
             except Exception as e:  # noqa: BLE001 - metadata is optional
                 logger.info("No metadata XML for item %s: %s", item_id, e)
-            self._item_metadata_cache[item_id] = entities
+                body, lasting = None, False
+            entities = parse_entities(body) if body else []
+            if body or lasting:
+                if len(self._item_metadata_cache) >= _MAX_CACHED_METADATA:
+                    self._item_metadata_cache.pop(next(iter(self._item_metadata_cache)))
+                self._item_metadata_cache[item_id] = entities
         return definitions_for_layer(
             entities,
             layer_name if isinstance(layer_name, str) else None,
             default_layer=default_layer,
         )
+
+    async def _fetch_item_metadata(self, item_id: str) -> tuple[bytes | None, bool]:
+        """Download an item's metadata XML, capped at ``MAX_METADATA_BYTES``.
+
+        Streams the body so an oversized document is abandoned without
+        being held in memory, uses a short timeout, and sends no
+        ``Authorization`` header: the document is public for public items,
+        and an ArcGIS Enterprise token must not travel to ArcGIS Online.
+
+        Returns:
+            ``(body, lasting)``: the document bytes (``None`` when there is
+            none to parse) and whether a miss is lasting enough to cache.
+        """
+        # A bare Request: ``send`` does not merge the client's default
+        # headers, so the bearer token is never attached.
+        request = httpx.Request(
+            "GET",
+            _ITEM_METADATA_URL.format(item_id=item_id),
+            extensions={"timeout": httpx.Timeout(_METADATA_TIMEOUT).as_dict()},
+        )
+        response = await self.feature_client.send(request, stream=True)
+        try:
+            if response.status_code != 200:
+                return None, 400 <= response.status_code < 500
+            declared = response.headers.get("content-length", "")
+            if declared.isdigit() and int(declared) > MAX_METADATA_BYTES:
+                return None, True
+            chunks: list[bytes] = []
+            size = 0
+            async for chunk in response.aiter_bytes():
+                size += len(chunk)
+                if size > MAX_METADATA_BYTES:
+                    return None, True
+                chunks.append(chunk)
+            return b"".join(chunks), True
+        finally:
+            await response.aclose()
 
     async def _layer_url_for(
         self, dataset_id: str, layer: int | None, *, queryable_only: bool = False
@@ -1863,6 +1901,10 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             low, high = (list(domain.get("range") or []) + [None, None])[:2]
             if low is None and high is None:
                 return ""
+            if high is None:
+                return f"Range: ≥ {self.portal_line(low)}"
+            if low is None:
+                return f"Range: ≤ {self.portal_line(high)}"
             return f"Range: {self.portal_line(low)} to {self.portal_line(high)}"
         values = domain.get("codedValues")
         if not isinstance(values, list) or not values:

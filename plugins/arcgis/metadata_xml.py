@@ -30,6 +30,9 @@ MAX_METADATA_BYTES = 2_000_000
 _MAX_ENUM_VALUES = 200
 
 # A Hub dataset id is the 32-hex item id, optionally with a ``_<layer>`` suffix.
+# Type words ArcGIS appends to entity labels (``Rents (Feature)``), normalized.
+_ENTITY_SUFFIXES = ("feature", "featureclass", "layer", "table")
+
 _ITEM_ID = re.compile(r"^([0-9a-fA-F]{32})(?:_\d+)?$")
 
 
@@ -57,7 +60,8 @@ def _has_dtd(document: bytes) -> bool:
         parser.Parse(document, True)
     except _DTDRefused:
         return True
-    except expat.ExpatError:
+    except (expat.ExpatError, LookupError, ValueError):
+        # Malformed XML, or an encoding expat cannot decode.
         return True
     return False
 
@@ -148,9 +152,10 @@ def definitions_for_layer(
 ) -> dict[str, dict[str, Any]]:
     """Pick the field definitions that describe one layer.
 
-    An entity whose label matches the layer name wins; it is compared
-    ignoring case and anything but letters and digits, and also matches a
-    label that adds a suffix such as ``(Feature)``. Without a match, a
+    An entity whose label equals the layer name wins; labels are compared
+    ignoring case and anything but letters and digits. Failing that, a
+    label that is the layer name plus a type suffix such as ``(Feature)``
+    or ``Table`` matches. Without a match, a
     document with a single entity is used for the item's default layer
     (labels often differ from layer names); otherwise nothing is returned,
     so one layer never shows another layer's definitions.
@@ -167,7 +172,10 @@ def definitions_for_layer(
     wanted = norm(layer_name)
     if wanted:
         for label, fields in entities:
-            if label and norm(label).startswith(wanted):
+            if norm(label) == wanted:
+                return fields
+        for label, fields in entities:
+            if norm(label) in {wanted + suffix for suffix in _ENTITY_SUFFIXES}:
                 return fields
     if len(entities) == 1 and default_layer:
         return entities[0][1]

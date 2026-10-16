@@ -40,7 +40,10 @@ IDs that the connector forwards to the portal. Defenses:
   credential scoping applies), and operators can disable auto-trust.
 - **Metadata XML parsing** (`plugins/arcgis/metadata_xml.py`). ArcGIS
   `get_schema` reads an item's formal metadata document from a fixed
-  `www.arcgis.com` URL built from a validated 32-hex item id. Documents over
+  `www.arcgis.com` URL built from a validated 32-hex item id, without the
+  bearer token (an ArcGIS Enterprise token never travels to ArcGIS Online)
+  and with a 10-second timeout. The body is streamed and abandoned past
+  2 MB, so an oversized document is never held in memory. Documents over
   2 MB are refused, and an expat pre-pass refuses any document that declares
   a DTD (doctype or entity declaration), whatever its encoding, before
   ElementTree builds a tree. Neither external entities (XXE) nor entity
