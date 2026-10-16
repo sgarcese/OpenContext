@@ -18,6 +18,12 @@ from core.base_plugin import HTTP_RETRY, ROW_FORMATS, BaseOpenDataPlugin, ToolHa
 from core.interfaces import PluginType, ToolDefinition, ToolResult
 from core.portal_content import html_to_text, join_cleaned
 from plugins.arcgis.config_schema import ArcGISPluginConfig
+from plugins.arcgis.metadata_xml import (
+    MAX_METADATA_BYTES,
+    definitions_for_layer,
+    item_id_from,
+    parse_entities,
+)
 from plugins.arcgis.where_validator import WhereValidator
 
 logger = logging.getLogger(__name__)
@@ -38,6 +44,14 @@ _SERVICE_ROOT = re.compile(
 DESCRIPTION_MAX = 12_000
 # Coded domain values listed per field in get_schema.
 _MAX_DOMAIN_VALUES = 30
+# Field definitions shown per field in get_schema (from the item metadata XML).
+_MAX_DEFINITION = 600
+# Formal item metadata lives on the ArcGIS Online sharing API, not on the Hub
+# site (a Hub domain answers this path with an HTML page).
+_ITEM_METADATA_URL = (
+    "https://www.arcgis.com/sharing/rest/content/items/{item_id}"
+    "/info/metadata/metadata.xml"
+)
 # Statistic types accepted by aggregate_data (ArcGIS ``statisticType``).
 STATISTIC_TYPES = ("count", "sum", "avg", "min", "max", "stddev")
 # A plain field name or output alias.
@@ -60,7 +74,7 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
     plugin_name = "arcgis"
     plugin_type = PluginType.OPEN_DATA
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
 
     config_class = ArcGISPluginConfig
     # Hub item IDs are 32-char hex; allow the underscore/hyphen variants seen
@@ -83,6 +97,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
         self._service_layers_cache: dict[str, list[dict[str, Any]]] = {}
         # layer URL -> layer metadata ({layer_url}?f=json, see _layer_metadata)
         self._layer_metadata_cache: dict[str, dict[str, Any]] = {}
+        # item id -> parsed metadata XML entities (see _field_definitions);
+        # [] records a missing or unusable document so it is not refetched.
+        self._item_metadata_cache: dict[str, list] = {}
 
     async def initialize(self) -> bool:
         """Initialize ArcGIS Hub plugin and test connection.
@@ -257,7 +274,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                 description=(
                     f"Get field schema for an ArcGIS Feature Service layer in {city}'s "
                     f"ArcGIS Hub catalog. Returns field names, types, and aliases "
-                    f"directly usable in query_data where/out_fields. Provide the Hub "
+                    f"directly usable in query_data where/out_fields, plus field "
+                    f"definitions and units when the item's metadata has them. "
+                    f"Provide the Hub "
                     f"dataset ID — the plugin resolves the Feature Service URL "
                     f"automatically (two-hop)."
                 ),
@@ -670,7 +689,9 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
         Resolves the Feature Service URL via :meth:`get_dataset` (two-hop),
         then fetches the layer metadata (``{layer_url}?f=json``) and
-        returns the ``fields`` list (name, type, alias).
+        returns the ``fields`` list (name, type, alias). Field definitions
+        and units come from the item's metadata XML when it has them (see
+        :meth:`_field_definitions`).
 
         Args:
             dataset_id: Hub item ID
@@ -679,14 +700,20 @@ class ArcGISPlugin(BaseOpenDataPlugin):
 
         Returns:
             List of field definition dictionaries (name, type, alias, plus
-            ``length`` for string fields and ``domain`` when the service
-            defines them)
+            ``length`` for string fields, ``domain`` when the service or the
+            metadata defines one, and ``definition``/``units`` from the
+            metadata)
 
         Raises:
             ValueError: If the dataset has no queryable service URL.
         """
-        layer_url, _ = await self._layer_url_for(dataset_id, layer)
-        fields, _ = await self._layer_fields(layer_url)
+        layer_url, dataset = await self._layer_url_for(dataset_id, layer)
+        fields, layer_metadata = await self._layer_fields(layer_url)
+        definitions = await self._field_definitions(
+            dataset.get("id") or dataset_id,
+            layer_metadata.get("name"),
+            default_layer=layer is None,
+        )
         schema = []
         for f in fields:
             entry = {
@@ -700,8 +727,54 @@ class ArcGISPlugin(BaseOpenDataPlugin):
                 entry["length"] = f["length"]
             if isinstance(f.get("domain"), dict):
                 entry["domain"] = f["domain"]
+            extra = definitions.get(str(entry["name"]).lower(), {})
+            for key in ("definition", "units"):
+                if extra.get(key):
+                    entry[key] = extra[key]
+            if "domain" not in entry and extra.get("domain"):
+                entry["domain"] = extra["domain"]
             schema.append(entry)
         return schema
+
+    async def _field_definitions(
+        self, dataset_id: Any, layer_name: Any, *, default_layer: bool = True
+    ) -> dict[str, dict[str, Any]]:
+        """Field definitions for a layer from the item's metadata XML.
+
+        Best-effort: a dataset id that is not an ArcGIS item id, a missing
+        document, an HTTP error, an oversized or malformed document all give
+        ``{}`` and never fail the schema call. Parsed documents (and misses)
+        are cached per item.
+
+        Returns:
+            ``{lower-cased field name: {"definition", "units", "domain"}}``
+            with whichever keys the document provides.
+        """
+        item_id = item_id_from(dataset_id)
+        if not item_id or not self.feature_client:
+            return {}
+        entities = self._item_metadata_cache.get(item_id)
+        if entities is None:
+            entities = []
+            try:
+                response = await self.feature_client.get(
+                    _ITEM_METADATA_URL.format(item_id=item_id)
+                )
+                body = response.content
+                if (
+                    response.status_code == 200
+                    and isinstance(body, bytes)
+                    and len(body) <= MAX_METADATA_BYTES
+                ):
+                    entities = parse_entities(body)
+            except Exception as e:  # noqa: BLE001 - metadata is optional
+                logger.info("No metadata XML for item %s: %s", item_id, e)
+            self._item_metadata_cache[item_id] = entities
+        return definitions_for_layer(
+            entities,
+            layer_name if isinstance(layer_name, str) else None,
+            default_layer=default_layer,
+        )
 
     async def _layer_url_for(
         self, dataset_id: str, layer: int | None, *, queryable_only: bool = False
@@ -1768,6 +1841,14 @@ class ArcGISPlugin(BaseOpenDataPlugin):
             lines.append(f"  • {name} ({detail})")
             if alias and alias != name:
                 lines.append(f"    Alias: {alias}")
+            definition = self.portal_line(
+                html_to_text(field.get("definition")), max_len=_MAX_DEFINITION
+            )
+            if definition and definition not in (name, alias):
+                lines.append(f"    Definition: {definition}")
+            units = self.portal_line(field.get("units"), max_len=80)
+            if units:
+                lines.append(f"    Units: {units}")
             domain = self._describe_domain(field.get("domain"))
             if domain:
                 lines.append(f"    {domain}")

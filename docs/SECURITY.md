@@ -38,6 +38,13 @@ IDs that the connector forwards to the portal. Defenses:
   and `.internal`/`.local` names, and non-service paths are refused, the
   bearer token is never forwarded to an auto-trusted host (redirect
   credential scoping applies), and operators can disable auto-trust.
+- **Metadata XML parsing** (`plugins/arcgis/metadata_xml.py`). ArcGIS
+  `get_schema` reads an item's formal metadata document from a fixed
+  `www.arcgis.com` URL built from a validated 32-hex item id. Documents over
+  2 MB or carrying a DTD (`<!DOCTYPE`/`<!ENTITY`) are refused before parsing,
+  so neither external entities (XXE) nor entity expansion ("billion laughs")
+  reach the stdlib parser. Definitions it yields are portal content and go
+  through the same cleaning and length caps as other schema text.
 
 ## Inbound: portal → LLM (prompt injection)
 
