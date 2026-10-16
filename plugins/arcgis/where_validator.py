@@ -67,6 +67,11 @@ class WhereValidator(BaseQueryValidator):
         # Scan only the structural SQL, not quoted string literals: values
         # like status = 'SET' or call_type = 'Initial Call' are legitimate
         # data, and keywords are only dangerous outside quotes.
+        # ArcGIS escapes a quote by doubling it. A backslash before a quote
+        # would end the literal early on a backend that honours C-style
+        # escapes, hiding SQL from the scan below, so refuse it outright.
+        if "\\'" in where:
+            raise ValueError("Backslash-escaped quote in WHERE clause; use '' instead")
         structural = _QUOTED_LITERAL.sub("''", where)
         forbidden = cls.scan_forbidden_keywords(structural)
         if forbidden:

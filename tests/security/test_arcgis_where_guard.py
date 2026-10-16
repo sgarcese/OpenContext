@@ -17,14 +17,23 @@ SUBQUERIES = [
     "x = 1 EXCEPT SELECT x FROM t",
     "x = 1\nUNION\nSELECT 1",
     "(SELECT 1) = 1",
+    # Under C-style escaping the literal ends at \' and the UNION runs.
+    "x = 'a\\'' UNION SELECT pw FROM t --'",
 ]
 
 
 class TestWhereValidatorRefusesSubqueries:
     @pytest.mark.parametrize("bad", SUBQUERIES)
     def test_rejects_set_operators_and_select(self, bad):
-        with pytest.raises(ValueError, match="Forbidden keyword"):
+        with pytest.raises(ValueError, match="Forbidden keyword|Backslash"):
             WhereValidator.validate(bad)
+
+    def test_rejects_backslash_escaped_quote(self):
+        with pytest.raises(ValueError, match="Backslash-escaped quote"):
+            WhereValidator.validate("name = 'it\\'s'")
+
+    def test_backslash_without_quote_is_data(self):
+        assert WhereValidator.validate("path = 'C:\\temp'") == "path = 'C:\\temp'"
 
     @pytest.mark.parametrize(
         "ok",
