@@ -5,7 +5,7 @@
 **Prerequisites:** Python 3.11+, [uv](https://docs.astral.sh/uv/), Git. For Go client work: Go 1.21+.
 
 ```bash
-git clone https://github.com/thealphacubicle/OpenContext.git
+git clone https://github.com/sgarcese/OpenContext.git
 cd OpenContext
 uv sync --all-extras          # install all deps including cli + dev
 cp config-example.yaml config.yaml   # edit for your data source
@@ -14,9 +14,9 @@ uv run pre-commit install            # set up lint/format hooks
 
 ## Branching & PRs
 
-- Branch off `develop`: `feature/`, `bugfix/`, `docs/`, `chore/`
-- Open PRs against `develop`, NOT `main`
-- CI must be green before merge: lint, security audit, tests (≥ 80% coverage)
+- Branch off `main`: `feat/`, `fix/`, `docs/`, `chore/`
+- Open PRs against `main`; one issue per branch, with `Closes #N` in the PR
+- CI must be green and the branch up to date with `main` before merge: lint, security audit, tests (≥ 80% coverage)
 
 **PR checklist:**
 
@@ -54,7 +54,7 @@ open htmlcov/index.html
 
 - Coverage gate is 80% — enforced in CI. New code needs tests.
 - See [`tests/README.md`](tests/README.md) for the layout: `tests/unit/`, `tests/integration/` (hermetic cross-boundary), `tests/security/`, `tests/smoke/`.
-- Built-in plugin unit tests: `tests/unit/plugins/{ckan,arcgis,socrata}/`
+- Built-in plugin unit tests: `tests/unit/plugins/{ckan,arcgis,socrata,opendatasoft}/`
 - Mock external HTTP (use `httpx`'s mock transport or `pytest-httpx`) — do not hit live APIs in unit tests.
 
 ## Plugin Development
@@ -108,10 +108,10 @@ Built-in plugins live in `plugins/` and ship with the framework.
 
 1. Create `plugins/{name}/plugin.py` inheriting `MCPPlugin` or `DataPlugin`
 2. Create `plugins/{name}/config_schema.py` with a Pydantic `BaseModel` for config validation
-3. Add tests in `tests/plugins/{name}/`
+3. Add tests in `tests/unit/plugins/{name}/` (and `tests/security/` for any query validator)
 4. Document tools and config in `docs/BUILT_IN_PLUGINS.md`
 
-See existing plugins (`plugins/ckan/`, `plugins/arcgis/`, `plugins/socrata/`) as reference implementations.
+See existing plugins (`plugins/ckan/`, `plugins/arcgis/`, `plugins/socrata/`, `plugins/opendatasoft/`) as reference implementations. Built-in plugins usually subclass `BaseOpenDataPlugin` (`core/base_plugin.py`) and treat portal text as untrusted (`core/portal_content.py`, see [`docs/SECURITY.md`](docs/SECURITY.md)).
 
 ## Commit Guidelines
 
@@ -131,6 +131,6 @@ test: add coverage for CKANPlugin.execute_sql error path
 
 ## Getting Help
 
-- [GitHub Issues](https://github.com/thealphacubicle/OpenContext/issues)
+- [GitHub Issues](https://github.com/sgarcese/OpenContext/issues)
 - [Architecture Guide](docs/ARCHITECTURE.md)
 - [FAQ](docs/FAQ.md)

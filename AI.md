@@ -1,15 +1,14 @@
 # AI.md
 
 OpenContext is an extensible MCP (Model Context Protocol) framework that exposes
-public open-data portals (CKAN, ArcGIS Hub, Socrata) to AI assistants. Stack:
+public open-data portals (CKAN, ArcGIS Hub, Socrata, Opendatasoft) to AI assistants. Stack:
 Python 3.11+ managed with `uv`, Typer CLI, aiohttp dev server, deployed to AWS
 (Lambda + API Gateway) or GCP (Cloud Functions gen2) via Terraform (`--cloud`).
 
 ## Directory map (non-obvious only)
 
 - `custom_plugins/` — drop-in user plugins; auto-discovered at startup and copied into the Lambda bundle by `cli/commands/deploy.py`
-- `server/adapters/` — runtime entry points: `aws_lambda.py` for production, local aiohttp server for dev
-- `examples/` — per-city example `config.yaml` files
+- `server/adapters/` — runtime entry points: `aws_lambda.py` (AWS) and `gcp_functions.py` (GCP); the local dev server is `cli/commands/serve.py` (aiohttp)
 - `client/` — optional Go stdio↔HTTP MCP bridge for stdio-only clients
 - `.claude/` — Claude Code project config (`settings.json`, glob-scoped `rules/`, `skills/`, `agents/`); see `CLAUDE.md`
 - `.cursor/` — Cursor rules; see `.cursor/rules/project.mdc`
@@ -39,7 +38,7 @@ Self-evident dirs (`core/`, `plugins/`, `cli/`, `tests/`, `docs/`, `terraform/`)
 
 - **Exactly one `plugins.*.enabled: true`** in `config.yaml`. Enforced at server startup (`core/validators.py`, `core/plugin_manager.py`) and pre-deploy (`cli/commands/deploy.py::_validate_single_plugin`). Multiple data sources require forking the repo, not toggling more flags.
 - **`config.yaml` is gitignored.** Never commit it. Template-level changes go in `config-example.yaml`.
-- **Branch off `develop`; PRs target `develop`, not `main`.** Prefixes: `feature/`, `bugfix/`, `docs/`, `chore/`.
+- **Branch off `main`; PRs target `main`** on [sgarcese/OpenContext](https://github.com/sgarcese/OpenContext). Prefixes: `feat/`, `fix/`, `docs/`, `chore/`. The `main` ruleset requires green CI and an up-to-date branch.
 - **CI fails below 80% coverage** on `core`, `plugins`, `server`. New code needs tests. `pyproject.toml` `[tool.coverage.run].omit` documents which modules are excluded — adding logic to those without un-omitting will not earn coverage.
 - **MCP tool names are namespaced `plugin__tool_name`** (double underscore, prepended automatically). Plugins must NOT include the prefix in their own `get_tools()` names.
 - **Lambda packaging targets `x86_64-manylinux2014` + Python 3.11.** `cli/commands/deploy.py::_package_lambda` runs `uv pip install -r requirements.txt --python-platform x86_64-manylinux2014 --python-version 3.11`. New deps must be wheel-compatible with that target — local `uv sync` success is not sufficient proof.
