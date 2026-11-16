@@ -253,6 +253,79 @@ class TestRunTests:
 
 
 # ---------------------------------------------------------------------------
+# _normalize_base_url / _is_jsonrpc_reply
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeBaseUrl:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://localhost:8000",
+            "http://localhost:8000/",
+            "http://localhost:8000/mcp",
+            "http://localhost:8000/mcp/",
+        ],
+    )
+    def test_strips_trailing_slash_and_mcp_segment(self, url):
+        from cli.commands.test import _normalize_base_url
+
+        assert _normalize_base_url(url) == "http://localhost:8000"
+
+    def test_keeps_stage_prefix(self):
+        from cli.commands.test import _normalize_base_url
+
+        url = "https://abc.execute-api.us-east-1.amazonaws.com/staging/mcp"
+        assert (
+            _normalize_base_url(url)
+            == "https://abc.execute-api.us-east-1.amazonaws.com/staging"
+        )
+
+
+class TestIsJsonrpcReply:
+    def test_result_is_accepted(self):
+        from cli.commands.test import _is_jsonrpc_reply
+
+        assert _is_jsonrpc_reply({"result": {}})
+
+    @pytest.mark.parametrize("body", ["404: Not Found", {}, {"message": "nope"}, None])
+    def test_non_jsonrpc_body_is_rejected(self, body):
+        from cli.commands.test import _is_jsonrpc_reply
+
+        assert not _is_jsonrpc_reply(body)
+
+    def test_error_only_accepted_when_allowed(self):
+        from cli.commands.test import _is_jsonrpc_reply
+
+        body = {"error": {"code": -32602, "message": "Invalid params"}}
+        assert not _is_jsonrpc_reply(body)
+        assert _is_jsonrpc_reply(body, allow_error=True)
+
+
+class TestRunTestsRejectsNotFound:
+    def test_404_text_body_fails_every_check(self):
+        from cli.commands.test import _run_tests
+
+        def not_found():
+            response = MagicMock()
+            response.status_code = 404
+            response.json.side_effect = ValueError("not json")
+            response.text = "404: Not Found"
+            return response
+
+        mock_client = MagicMock()
+        mock_client.post.side_effect = [not_found(), not_found(), not_found()]
+        mock_client.__enter__ = lambda s: s
+        mock_client.__exit__ = MagicMock(return_value=False)
+
+        with patch("cli.commands.test.httpx.Client", return_value=mock_client):
+            passed, total = _run_tests("http://localhost:8000/mcp")
+
+        assert total == 4
+        assert passed == 0
+
+
+# ---------------------------------------------------------------------------
 # test command — explicit --url flag
 # ---------------------------------------------------------------------------
 
@@ -270,6 +343,17 @@ class TestTestCommandWithUrl:
         mock_run.assert_called_once_with(
             "https://custom.example.com"
         )  # trailing slash stripped
+
+    @patch("cli.commands.test._run_tests", return_value=(4, 4))
+    def test_accepts_url_ending_in_mcp(self, mock_run):
+        from cli.commands.test import test
+
+        ctx = MagicMock()
+        ctx.invoked_subcommand = None
+
+        test(ctx=ctx, env="staging", url="http://localhost:8000/mcp")
+
+        mock_run.assert_called_once_with("http://localhost:8000")
 
     @patch("cli.commands.test._run_tests", return_value=(3, 4))
     def test_exits_1_when_tests_fail(self, mock_run):

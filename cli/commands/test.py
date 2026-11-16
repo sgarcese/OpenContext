@@ -85,6 +85,31 @@ def _post_mcp(client: httpx.Client, base_url: str, payload: dict) -> tuple[bool,
         return False, elapsed_ms, str(e)
 
 
+def _normalize_base_url(url: str) -> str:
+    """Return *url* without a trailing slash or a trailing ``/mcp`` segment.
+
+    ``_post_mcp`` appends ``MCP_PATH`` itself, so both the server root and the
+    full endpoint printed by ``opencontext serve`` are accepted.
+    """
+    base_url = url.rstrip("/")
+    if base_url.endswith(MCP_PATH):
+        base_url = base_url[: -len(MCP_PATH)]
+    return base_url
+
+
+def _is_jsonrpc_reply(body: Any, allow_error: bool = False) -> bool:
+    """Return True if *body* is a JSON-RPC reply carrying a ``result``.
+
+    With *allow_error*, a JSON-RPC ``error`` object is accepted too: the server
+    answered the call, even if it rejected the arguments.
+    """
+    if not isinstance(body, dict):
+        return False
+    if "result" in body:
+        return True
+    return allow_error and "error" in body
+
+
 def _is_auth_gated(body: Any) -> bool:
     """Return True if the response is an AWS API Gateway auth error (not a real MCP response)."""
     if isinstance(body, dict):
@@ -110,7 +135,7 @@ def _run_tests(base_url: str) -> tuple[int, int]:
                 "(direct invocation is auth-gated). Use the custom domain to test.[/yellow]\n"
             )
             return 0, 0
-        results.append(("Ping", ok, ms, _summarize(body)))
+        results.append(("Ping", ok and _is_jsonrpc_reply(body), ms, _summarize(body)))
 
         # 2. Initialize
         ok, ms, body = _post_mcp(client, base_url, {
@@ -123,12 +148,15 @@ def _run_tests(base_url: str) -> tuple[int, int]:
                 "clientInfo": {"name": "opencontext-cli", "version": "1.0.0"},
             },
         })
-        results.append(("Initialize", ok, ms, _summarize(body)))
+        results.append(
+            ("Initialize", ok and _is_jsonrpc_reply(body), ms, _summarize(body))
+        )
 
         # 3. List tools
         ok, ms, body = _post_mcp(client, base_url, {
             "jsonrpc": "2.0", "id": 3, "method": "tools/list",
         })
+        ok = ok and _is_jsonrpc_reply(body)
         results.append(("List tools", ok, ms, _summarize(body)))
 
         # 4. Call first available tool with minimal args
@@ -147,7 +175,10 @@ def _run_tests(base_url: str) -> tuple[int, int]:
                 "method": "tools/call",
                 "params": {"name": first_tool, "arguments": {}},
             })
-            # Accept either a result or a validation error (not a 500-level failure)
+            # The call is sent with empty arguments, so this only checks that the
+            # server routes it: a result or a validation error both pass. It does
+            # not show that the upstream portal is reachable.
+            ok = ok and _is_jsonrpc_reply(body, allow_error=True)
             results.append((f"Call tool: {first_tool}", ok, ms, _summarize(body)))
         else:
             results.append(("Call first tool", False, 0.0, "No tools returned from list"))
@@ -211,7 +242,7 @@ def test(
     exit_ok = True
 
     if url:
-        base_url = url.rstrip("/")
+        base_url = _normalize_base_url(url)
         passed, total = _run_tests(base_url)
         total_passed += passed
         total_tests += total
